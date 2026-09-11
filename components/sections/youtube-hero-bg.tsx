@@ -195,6 +195,39 @@ export function YoutubeHeroBg({
     };
   }, [id, failTimeoutMs]);
 
+  // ── Portrait fit factor ──
+  // A 16:9 frame forced to COVER a tall narrow screen has to be enormous:
+  // on a 390x844 phone it is 1500px wide, so the viewer sees the middle 26%
+  // and three quarters of the shot is thrown away. We publish the scale that
+  // would instead fit the WHOLE frame on screen, and the CSS below starts
+  // there and zooms to full cover as the hero is scrolled.
+  //
+  // This has to be measured rather than written in CSS: the factor is
+  // viewportWidth / coverWidth, and CSS cannot divide one length by another
+  // to produce the unitless number `scale()` needs.
+  useEffect(() => {
+    const el = mountRef.current;
+    if (!el) return;
+
+    const setFit = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      // Mirrors `width: max(177.78vh, 100vw)` in the stylesheet below.
+      const coverW = Math.max((16 / 9) * h, w);
+      // Landscape already shows essentially the whole frame — leave it alone.
+      const fit = h > w ? Math.min(1, w / coverW) : 1;
+      el.style.setProperty('--yt-fit', fit.toFixed(4));
+    };
+
+    setFit();
+    window.addEventListener('resize', setFit, { passive: true });
+    window.addEventListener('orientationchange', setFit);
+    return () => {
+      window.removeEventListener('resize', setFit);
+      window.removeEventListener('orientationchange', setFit);
+    };
+  }, []);
+
   return (
     <div
       ref={mountRef}
@@ -212,10 +245,64 @@ export function YoutubeHeroBg({
           position: absolute;
           left: 50%;
           top: 50%;
-          width: max(177.78vh, 100vw);
-          height: max(100vh, 56.25vw);
+          /* !important is load-bearing: the YouTube IFrame API writes
+             style="width:100%;height:100%" directly onto the iframe once the
+             player boots, and an inline style beats a stylesheet rule. Without
+             this the cover maths below never applied at all — invisible on a
+             16:9 desktop window (100% of the wrapper happens to be right) but
+             wrong on every portrait phone, where the player then letterboxed
+             the video inside a tall box instead of filling it. */
+          width: max(177.78vh, 100vw) !important;
+          height: max(100vh, 56.25vw) !important;
           transform: translate(-50%, -50%);
           border: 0;
+        }
+
+        /* ── PORTRAIT: fit the whole frame, then zoom to cover on scroll ──
+           At rest the iframe is scaled down to --yt-fit (measured above), so
+           the complete 16:9 shot is visible as a centred band with the
+           generative tunnel showing above and below it. Scrolling scales it
+           back to 1, which is exactly the full-bleed cover desktop gets.
+           Landscape is untouched: --yt-fit is 1 there, so this is a no-op. */
+        @media (orientation: portrait) {
+          div[data-yt-status] :global(iframe) {
+            transform: translate(-50%, -50%) scale(var(--yt-fit, 1));
+          }
+        }
+
+        @keyframes yt-portrait-zoom {
+          from {
+            transform: translate(-50%, -50%) scale(var(--yt-fit, 1));
+          }
+          to {
+            transform: translate(-50%, -50%) scale(1);
+          }
+        }
+
+        /* Rides --hero-dive, the same view timeline the rest of the hero
+           choreography uses (declared on .hero-stage in styles/motion/hero.css).
+           Shorthand FIRST, then timeline/range — the shorthand resets both.
+           No animation-duration: on a progress timeline it is ignored, and
+           leaving it off is what makes browsers without scroll-driven support
+           fall back to the end state instead of auto-playing this on load. */
+        @supports (animation-timeline: view()) {
+          @media (orientation: portrait) {
+            div[data-yt-status] :global(iframe) {
+              animation: yt-portrait-zoom linear both;
+              animation-timeline: --hero-dive;
+              animation-range: exit 0% exit 55%;
+            }
+          }
+        }
+
+        /* Reduced motion keeps the FITTED frame rather than snapping to the
+           zoomed end state: no movement, and the whole shot stays visible.
+           The global reduced-motion block would otherwise park this on its
+           last keyframe (full cover), which is the worse of the two. */
+        @media (prefers-reduced-motion: reduce) {
+          div[data-yt-status] :global(iframe) {
+            animation: none !important;
+          }
         }
       `}</style>
     </div>
