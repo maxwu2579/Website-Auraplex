@@ -9,8 +9,8 @@ import { HeroTunnel } from '@/components/sections/hero-tunnel';
 import { YoutubeHeroBgLazy } from '@/components/sections/youtube-hero-bg-lazy';
 import { whatsappLink } from '@/lib/utils';
 
-/** Auraplex factory-floor footage used as the hero background. */
-const HERO_VIDEO_ID = 'vqv4IKY30BU';
+/** Auraplex company introduction film used as the hero background. */
+const HERO_VIDEO_ID = 'djIrbyer4m4';
 
 /**
  * Hero — the runway INTO the MachineHyperscroll signature.
@@ -63,13 +63,15 @@ export function HeroCinematic() {
         />
         <HeroTunnel />
 
-        {/* Real Auraplex factory footage, layered OVER the generative tunnel so
-            that when the embed plays it is the dominant visual. Lazy-loaded
+        {/* Real Auraplex footage, layered OVER the generative tunnel so that
+            when the embed plays it is the dominant visual. Lazy-loaded
             (ssr:false) so YouTube's ~100KB IFrame API never touches the LCP
             path, and self-hiding: if the embed is blocked (bot wall, region
             lock, embed disabled) it fades to 0 and the tunnel carries the hero.
-            HERO_VIDEO_ID lives here so it is trivial to swap. */}
-        <YoutubeHeroBgLazy id={HERO_VIDEO_ID} title="Auraplex factory floor" />
+            HERO_VIDEO_ID lives here so it is trivial to swap — keep the `title`
+            describing whatever that ID actually is, it is the accessible name
+            for the background video. */}
+        <YoutubeHeroBgLazy id={HERO_VIDEO_ID} title="Auraplex company introduction" />
       </div>
 
       {/* Cursor spotlight halo */}
