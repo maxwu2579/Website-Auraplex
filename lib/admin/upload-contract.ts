@@ -32,8 +32,28 @@ export interface UploadRequestMetadata {
 export interface UploadSuccessResponse {
   ok: true;
   uploadId: string;
+  bucket: UploadBucket;
+  key: string;
   sourceKey: string;
   status: UploadStatus;
+}
+
+export interface RecentUpload {
+  uploadId: string;
+  bucket: UploadBucket;
+  key: string;
+  sourceKey: string;
+  filename: string;
+  size: number;
+  uploadedAt: string | null;
+  ingestionCapability: UploadMediaRoute['ingestionCapability'];
+  status: UploadStatus;
+}
+
+export interface RecentUploadsResponse {
+  ok: true;
+  uploads: RecentUpload[];
+  qdrantAvailable: boolean;
 }
 
 export type UploadApiErrorCode =
@@ -100,9 +120,90 @@ export type UploadBucket =
   | 'auraplex-raw-image'
   | 'auraplex-raw-video';
 
+export const UPLOAD_BUCKETS: readonly UploadBucket[] = [
+  'auraplex-raw-pdf',
+  'auraplex-raw-image',
+  'auraplex-raw-video',
+];
+
 export interface UploadMediaRoute {
   bucket: UploadBucket;
   canonicalMimeType: string;
   acceptedExtensions: readonly string[];
   ingestionCapability: 'supported' | 'deferred';
+}
+
+export const UPLOAD_MEDIA_ROUTES: Readonly<Record<string, UploadMediaRoute>> = {
+  'application/pdf': {
+    bucket: 'auraplex-raw-pdf',
+    canonicalMimeType: 'application/pdf',
+    acceptedExtensions: ['pdf'],
+    ingestionCapability: 'supported',
+  },
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {
+    bucket: 'auraplex-raw-pdf',
+    canonicalMimeType:
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    acceptedExtensions: ['docx'],
+    ingestionCapability: 'deferred',
+  },
+  'image/png': {
+    bucket: 'auraplex-raw-image',
+    canonicalMimeType: 'image/png',
+    acceptedExtensions: ['png'],
+    ingestionCapability: 'deferred',
+  },
+  'image/jpeg': {
+    bucket: 'auraplex-raw-image',
+    canonicalMimeType: 'image/jpeg',
+    acceptedExtensions: ['jpg', 'jpeg'],
+    ingestionCapability: 'deferred',
+  },
+  'image/webp': {
+    bucket: 'auraplex-raw-image',
+    canonicalMimeType: 'image/webp',
+    acceptedExtensions: ['webp'],
+    ingestionCapability: 'deferred',
+  },
+  'video/mp4': {
+    bucket: 'auraplex-raw-video',
+    canonicalMimeType: 'video/mp4',
+    acceptedExtensions: ['mp4'],
+    ingestionCapability: 'deferred',
+  },
+  'video/webm': {
+    bucket: 'auraplex-raw-video',
+    canonicalMimeType: 'video/webm',
+    acceptedExtensions: ['webm'],
+    ingestionCapability: 'deferred',
+  },
+  'video/quicktime': {
+    bucket: 'auraplex-raw-video',
+    canonicalMimeType: 'video/quicktime',
+    acceptedExtensions: ['mov'],
+    ingestionCapability: 'deferred',
+  },
+};
+
+export const ACCEPTED_UPLOAD_EXTENSIONS = Object.freeze(
+  Array.from(
+    new Set(
+      Object.values(UPLOAD_MEDIA_ROUTES).flatMap(
+        (route) => route.acceptedExtensions,
+      ),
+    ),
+  ),
+);
+
+export const UPLOAD_INPUT_ACCEPT = ACCEPTED_UPLOAD_EXTENSIONS
+  .map((extension) => `.${extension}`)
+  .join(',');
+
+export function uploadMediaForExtension(
+  extension: string,
+): UploadMediaRoute | undefined {
+  const normalized = extension.toLowerCase();
+  return Object.values(UPLOAD_MEDIA_ROUTES).find((route) =>
+    route.acceptedExtensions.includes(normalized),
+  );
 }

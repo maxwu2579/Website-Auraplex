@@ -1,71 +1,17 @@
-import { MACHINES, type Category } from '@/lib/catalog';
+import { MACHINES, PRODUCT_CATEGORIES, type Category } from '@/lib/catalog';
 import {
   MAX_UPLOAD_BYTES,
   UPLOAD_HEADERS,
+  UPLOAD_MEDIA_ROUTES,
   type ProductLine,
   type UploadMediaRoute,
   type UploadObjectLocation,
   type UploadRequestMetadata,
 } from '@/lib/admin/upload-contract';
 import { UploadContractError } from '@/lib/admin/upload-errors';
+import { toQdrantSourceKey } from '@/lib/admin/source-key';
 
-const PRODUCT_LINES = new Set<Category>([
-  'labelling',
-  'packaging',
-  'automation',
-]);
-
-const MEDIA_ROUTES: Readonly<Record<string, UploadMediaRoute>> = {
-  'application/pdf': {
-    bucket: 'auraplex-raw-pdf',
-    canonicalMimeType: 'application/pdf',
-    acceptedExtensions: ['pdf'],
-    ingestionCapability: 'supported',
-  },
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {
-    bucket: 'auraplex-raw-pdf',
-    canonicalMimeType:
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    acceptedExtensions: ['docx'],
-    ingestionCapability: 'deferred',
-  },
-  'image/png': {
-    bucket: 'auraplex-raw-image',
-    canonicalMimeType: 'image/png',
-    acceptedExtensions: ['png'],
-    ingestionCapability: 'deferred',
-  },
-  'image/jpeg': {
-    bucket: 'auraplex-raw-image',
-    canonicalMimeType: 'image/jpeg',
-    acceptedExtensions: ['jpg', 'jpeg'],
-    ingestionCapability: 'deferred',
-  },
-  'image/webp': {
-    bucket: 'auraplex-raw-image',
-    canonicalMimeType: 'image/webp',
-    acceptedExtensions: ['webp'],
-    ingestionCapability: 'deferred',
-  },
-  'video/mp4': {
-    bucket: 'auraplex-raw-video',
-    canonicalMimeType: 'video/mp4',
-    acceptedExtensions: ['mp4'],
-    ingestionCapability: 'deferred',
-  },
-  'video/webm': {
-    bucket: 'auraplex-raw-video',
-    canonicalMimeType: 'video/webm',
-    acceptedExtensions: ['webm'],
-    ingestionCapability: 'deferred',
-  },
-  'video/quicktime': {
-    bucket: 'auraplex-raw-video',
-    canonicalMimeType: 'video/quicktime',
-    acceptedExtensions: ['mov'],
-    ingestionCapability: 'deferred',
-  },
-};
+const PRODUCT_LINES = new Set<Category>(PRODUCT_CATEGORIES);
 
 function requiredHeader(headers: Headers, name: string): string {
   const value = headers.get(name)?.trim();
@@ -239,7 +185,7 @@ export function resolveUploadMedia(
   safeFilename: string,
 ): UploadMediaRoute {
   const mime = declaredMimeType.split(';', 1)[0].trim().toLowerCase();
-  const route = MEDIA_ROUTES[mime];
+  const route = UPLOAD_MEDIA_ROUTES[mime];
   const extension = safeFilename.split('.').pop()?.toLowerCase() ?? '';
 
   if (!route || !route.acceptedExtensions.includes(extension)) {
@@ -269,11 +215,11 @@ export function buildUploadObjectLocation(input: {
   }
 
   const key = [input.productLine, input.productSlug, input.safeFilename].join('/');
-  return {
+  const location = {
     bucket: input.media.bucket,
     key,
-    sourceKey: `${input.media.bucket}/${key}`,
   };
+  return { ...location, sourceKey: toQdrantSourceKey(location) };
 }
 
 export function parseUploadRequestMetadata(headers: Headers): UploadRequestMetadata {
@@ -323,4 +269,4 @@ export function prepareUploadRequest(headers: Headers) {
   return { metadata, product, safeFilename, media, location };
 }
 
-export const uploadMediaRoutes = MEDIA_ROUTES;
+export const uploadMediaRoutes = UPLOAD_MEDIA_ROUTES;

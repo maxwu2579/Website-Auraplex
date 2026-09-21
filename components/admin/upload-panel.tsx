@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -18,33 +18,19 @@ import {
 import { Button } from '@/components/primitives/button';
 import type { Category } from '@/lib/catalog';
 import {
+  ACCEPTED_UPLOAD_EXTENSIONS,
   MAX_UPLOAD_BYTES,
+  UPLOAD_HEADERS,
+  UPLOAD_INPUT_ACCEPT,
+  uploadMediaForExtension,
+  type RecentUpload,
+  type RecentUploadsResponse,
+  type UploadApiResponse,
   type UiUploadQueueStatus,
 } from '@/lib/admin/upload-contract';
+import { canRetryUpload, queueStatusAfterResponse } from '@/lib/admin/upload-ui-state';
 
-const ACCEPTED_EXTENSIONS = new Set([
-  'pdf',
-  'docx',
-  'png',
-  'jpg',
-  'jpeg',
-  'webp',
-  'mp4',
-  'webm',
-  'mov',
-]);
-
-const INPUT_ACCEPT = [
-  '.pdf',
-  '.docx',
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.webp',
-  '.mp4',
-  '.webm',
-  '.mov',
-].join(',');
+const ACCEPTED_EXTENSIONS = new Set(ACCEPTED_UPLOAD_EXTENSIONS);
 
 type ProductOption = {
   id: string;
@@ -59,6 +45,7 @@ type QueuedFile = {
   extension: string;
   ingestion: 'supported' | 'deferred';
   status: UiUploadQueueStatus;
+  error?: string;
 };
 
 type Props = {
@@ -93,6 +80,33 @@ function newFileId(): string {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+async function loadRecentUploads(): Promise<{
+  uploads: RecentUpload[];
+  notice: string;
+}> {
+  try {
+    const response = await fetch('/api/admin/uploads', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    const body = (await response.json()) as RecentUploadsResponse | UploadApiResponse;
+    if (!response.ok || !body.ok || !('uploads' in body)) {
+      return {
+        uploads: [],
+        notice: 'error' in body ? body.error : 'Upload status is unavailable',
+      };
+    }
+    return {
+      uploads: body.uploads,
+      notice: body.qdrantAvailable
+        ? 'MinIO and Qdrant evidence loaded.'
+        : 'MinIO loaded; Qdrant is not configured, so processed evidence is unavailable.',
+    };
+  } catch {
+    return { uploads: [], notice: 'Backend status connection is unavailable.' };
+  }
+}
+
 export function UploadPanel({ products }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [productLine, setProductLine] = useState<Category | ''>('');
@@ -100,6 +114,14 @@ export function UploadPanel({ products }: Props) {
   const [files, setFiles] = useState<QueuedFile[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [recentUploads, setRecentUploads] = useState<RecentUpload[]>([]);
+  const [recentNotice, setRecentNotice] = useState('Checking backend connection…');
+
+  const productLines = useMemo(
+    () => Array.from(new Set(products.map((product) => product.category))),
+    [products],
+  );
 
   const filteredProducts = useMemo(
     () => products.filter((product) => product.category === productLine),
@@ -107,7 +129,28 @@ export function UploadPanel({ products }: Props) {
   );
 
   const selectedProduct = products.find((product) => product.id === productId);
-  const canPrepareUpload = Boolean(productLine && productId && files.length > 0);
+  const uploadCandidates = files.filter(
+    (item) => item.status === 'ready' || canRetryUpload(item.status),
+  );
+  const canPrepareUpload = Boolean(
+    productLine && productId && uploadCandidates.length > 0 && !uploading,
+  );
+
+  const refreshRecentUploads = useCallback(async () => {
+    const result = await loadRecentUploads();
+    setRecentUploads(result.uploads);
+    setRecentNotice(result.notice);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void loadRecentUploads().then((result) => {
+      if (!active) return;
+      setRecentUploads(result.uploads);
+      setRecentNotice(result.notice);
+    });
+    return () => { active = false; };
+  }, []);
 
   function changeProductLine(value: Category | '') {
     setProductLine(value);
@@ -137,7 +180,7 @@ export function UploadPanel({ products }: Props) {
         id: newFileId(),
         file,
         extension,
-        ingestion: extension === 'pdf' ? 'supported' : 'deferred',
+        ingestion: uploadMediaForExtension(extension)?.ingestionCapability ?? 'deferred',
         status: 'ready',
       });
     }
@@ -162,6 +205,78 @@ export function UploadPanel({ products }: Props) {
     setFiles((current) => current.filter((item) => item.id !== id));
   }
 
+  function updateFile(id: string, update: Partial<QueuedFile>) {
+    setFiles((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...update } : item)),
+    );
+  }
+
+  async function uploadFiles() {
+    if (!productLine || !productId || !canPrepareUpload) return;
+    setUploading(true);
+    setNotice(null);
+
+    try {
+      const csrfResponse = await fetch('/api/admin/csrf', {
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+      const csrfBody = (await csrfResponse.json()) as {
+        ok: boolean;
+        csrfToken?: string;
+        error?: string;
+      };
+      if (!csrfResponse.ok || !csrfBody.ok || !csrfBody.csrfToken) {
+        const message = csrfBody.error || 'Authentication or CSRF setup is unavailable';
+        setNotice(message);
+        setFiles((current) =>
+          current.map((item) =>
+            item.status === 'ready' || item.status === 'failed'
+              ? { ...item, status: 'failed', error: message }
+              : item,
+          ),
+        );
+        return;
+      }
+
+      for (const item of uploadCandidates) {
+        updateFile(item.id, { status: 'uploading', error: undefined });
+        try {
+          const media = uploadMediaForExtension(item.extension);
+          if (!media) throw new Error('Unsupported upload type');
+          const response = await fetch('/api/admin/uploads', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': media.canonicalMimeType,
+              [UPLOAD_HEADERS.productLine]: productLine,
+              [UPLOAD_HEADERS.productId]: productId,
+              [UPLOAD_HEADERS.filename]: encodeURIComponent(item.file.name),
+              [UPLOAD_HEADERS.csrfToken]: csrfBody.csrfToken,
+            },
+            body: item.file,
+          });
+          const body = (await response.json()) as UploadApiResponse;
+          const status = queueStatusAfterResponse(body);
+          updateFile(item.id, {
+            status,
+            error: body.ok ? undefined : body.error,
+          });
+          if (!response.ok || !body.ok) {
+            setNotice(body.ok ? 'Upload failed' : body.error);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Upload failed';
+          updateFile(item.id, { status: 'failed', error: message });
+          setNotice(message);
+        }
+      }
+      await refreshRecentUploads();
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[color:var(--color-ink)]">
       <header className="border-b border-[color:var(--color-neutral-700)] bg-[color:var(--color-neutral-800)]/80 backdrop-blur">
@@ -180,8 +295,8 @@ export function UploadPanel({ products }: Props) {
 
           <div className="flex items-center gap-3">
             <div className="hidden text-right sm:block">
-              <p className="font-mono text-xs uppercase tracking-wider">Authentication pending</p>
-              <p className="text-xs text-[color:var(--color-neutral-400)]">Keycloak will supply the user</p>
+              <p className="font-mono text-xs uppercase tracking-wider">Keycloak boundary prepared</p>
+              <p className="text-xs text-[color:var(--color-neutral-400)]">Runtime configuration required</p>
             </div>
             <button
               type="button"
@@ -211,7 +326,7 @@ export function UploadPanel({ products }: Props) {
           </div>
           <div className="flex items-center gap-3 border border-[color:var(--color-warning)]/50 bg-[color:var(--color-warning)]/10 px-4 py-3 text-sm text-[color:var(--color-warning)]">
             <Clock3 aria-hidden="true" className="h-4 w-4 shrink-0" />
-            UI scaffold — backend connection pending
+            Integration layer ready — runtime configuration required
           </div>
         </div>
 
@@ -237,9 +352,11 @@ export function UploadPanel({ products }: Props) {
                     className="h-12 w-full border border-[color:var(--color-neutral-600)] bg-[color:var(--color-ink)] px-4 text-sm outline-none transition-colors focus:border-[color:var(--color-signal)]"
                   >
                     <option value="">Select a product line</option>
-                    <option value="labelling">Labelling</option>
-                    <option value="packaging">Packaging</option>
-                    <option value="automation">Automation</option>
+                    {productLines.map((line) => (
+                      <option key={line} value={line}>
+                        {line.charAt(0).toUpperCase() + line.slice(1)}
+                      </option>
+                    ))}
                   </select>
                 </label>
 
@@ -301,7 +418,7 @@ export function UploadPanel({ products }: Props) {
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    accept={INPUT_ACCEPT}
+                    accept={UPLOAD_INPUT_ACCEPT}
                     className="sr-only"
                     onChange={(event) => {
                       if (event.target.files) addFiles(event.target.files);
@@ -344,8 +461,20 @@ export function UploadPanel({ products }: Props) {
                             <span className={item.ingestion === 'supported' ? 'text-[color:var(--color-success)]' : 'text-[color:var(--color-warning)]'}>
                               {item.ingestion === 'supported' ? 'Indexable' : 'Storage only'}
                             </span>
+                            <span>{item.status}</span>
                           </div>
+                          {item.error && <p className="mt-1 text-xs text-[color:var(--color-danger)]">{item.error}</p>}
                         </div>
+                        {item.status === 'failed' && (
+                          <button
+                            type="button"
+                            disabled={uploading}
+                            onClick={() => updateFile(item.id, { status: 'ready', error: undefined })}
+                            className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--color-signal)]"
+                          >
+                            Retry
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => removeFile(item.id)}
@@ -362,15 +491,15 @@ export function UploadPanel({ products }: Props) {
 
               <div className="flex flex-col gap-3 border-t border-[color:var(--color-neutral-700)] pt-6 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs leading-5 text-[color:var(--color-neutral-400)]">
-                  Server-side authentication, MIME sniffing and streaming limits will be added with the upload endpoint.
+                  Files upload sequentially. The UI shows only real request states; no percentage is estimated.
                 </p>
                 <Button
                   type="button"
                   disabled={!canPrepareUpload}
-                  onClick={() => setNotice('Upload API connection is not configured on this scaffold branch yet.')}
+                  onClick={() => void uploadFiles()}
                   className="shrink-0"
                 >
-                  Upload {files.length || ''} file{files.length === 1 ? '' : 's'}
+                  {uploading ? 'Uploading…' : `Upload ${uploadCandidates.length || ''} file${uploadCandidates.length === 1 ? '' : 's'}`}
                   <ChevronRight aria-hidden="true" className="h-4 w-4" />
                 </Button>
               </div>
@@ -384,15 +513,27 @@ export function UploadPanel({ products }: Props) {
             </div>
 
             <div className="p-5 sm:p-6">
-              <div className="grid min-h-52 place-items-center border border-[color:var(--color-neutral-700)] bg-[color:var(--color-ink)]/35 px-5 text-center">
-                <div>
-                  <CheckCircle2 aria-hidden="true" className="mx-auto h-7 w-7 text-[color:var(--color-neutral-500)]" />
-                  <p className="mt-4 text-sm text-[color:var(--color-neutral-200)]">No uploads to display</p>
-                  <p className="mt-2 text-xs leading-5 text-[color:var(--color-neutral-400)]">
-                    MinIO and Qdrant status will appear here after the backend connection is configured.
-                  </p>
+              {recentUploads.length === 0 ? (
+                <div className="grid min-h-52 place-items-center border border-[color:var(--color-neutral-700)] bg-[color:var(--color-ink)]/35 px-5 text-center">
+                  <div>
+                    <CheckCircle2 aria-hidden="true" className="mx-auto h-7 w-7 text-[color:var(--color-neutral-500)]" />
+                    <p className="mt-4 text-sm text-[color:var(--color-neutral-200)]">No uploads to display</p>
+                    <p className="mt-2 text-xs leading-5 text-[color:var(--color-neutral-400)]">{recentNotice}</p>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <ul className="divide-y divide-[color:var(--color-neutral-700)] border border-[color:var(--color-neutral-700)]">
+                  {recentUploads.map((upload) => (
+                    <li key={`${upload.bucket}/${upload.key}`} className="p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate text-sm">{upload.filename}</p>
+                        <span className="font-mono text-[10px] uppercase text-[color:var(--color-signal)]">{upload.status}</span>
+                      </div>
+                      <p className="mt-2 truncate font-mono text-[10px] text-[color:var(--color-neutral-400)]">{upload.sourceKey}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               <div className="mt-6 space-y-3">
                 {[
