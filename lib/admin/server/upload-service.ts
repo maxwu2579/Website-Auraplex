@@ -14,6 +14,7 @@ import {
 } from '@/lib/admin/upload-validation';
 import {
   authenticateAdminRequest,
+  canViewAllUploads,
   type AdminIdentity,
 } from '@/lib/admin/server/authorization';
 import {
@@ -39,6 +40,9 @@ import {
   type StorageAdapter,
 } from '@/lib/admin/server/storage';
 import { buildRecentUpload } from '@/lib/admin/server/status';
+import { sniffUploadStream } from '@/lib/admin/server/mime-sniff';
+
+const RECENT_UPLOAD_LIMIT = 50;
 
 export interface UploadServiceDependencies {
   authenticate: () => Promise<AdminIdentity>;
@@ -107,9 +111,12 @@ export async function putUpload(
     const uploadId = dependencies.createUploadId();
     auditKey = prepared.location.key;
     auditSize = prepared.metadata.declaredSize;
-    const limitedWebStream = request.body.pipeThrough(createUploadByteLimitStream());
+    const countedWebStream = request.body.pipeThrough(
+      createUploadByteLimitStream(undefined, prepared.metadata.declaredSize),
+    );
+    const sniffed = await sniffUploadStream(countedWebStream, prepared.media);
     const nodeStream = Readable.fromWeb(
-      limitedWebStream as unknown as NodeReadableStream<Uint8Array>,
+      sniffed.stream as unknown as NodeReadableStream<Uint8Array>,
     );
 
     await dependencies.storage().putObject({
@@ -126,6 +133,7 @@ export async function putUpload(
         'safe-filename': prepared.safeFilename,
         'mime-type': prepared.media.canonicalMimeType,
         'ingestion-capability': prepared.media.ingestionCapability,
+        'uploaded-by': encodeURIComponent(identity.userId),
       },
     });
 
@@ -162,24 +170,46 @@ export async function putUpload(
   }
 }
 
+function metadataUploader(metadata: Record<string, string>): string | null {
+  const stored = metadata['uploaded-by'];
+  if (!stored) return null;
+  try {
+    return decodeURIComponent(stored);
+  } catch {
+    return null;
+  }
+}
+
 export async function getUploads(
   _request: Request,
   dependencies: UploadServiceDependencies = defaultDependencies,
 ): Promise<Response> {
   try {
-    await dependencies.authenticate();
+    const identity = await dependencies.authenticate();
     const storage = dependencies.storage();
     const qdrant = dependencies.qdrant();
     const stored = (
-      await Promise.all(UPLOAD_BUCKETS.map((bucket) => storage.listObjects(bucket)))
-    ).flat();
+      await Promise.all(
+        UPLOAD_BUCKETS.map((bucket) =>
+          storage.listObjects(bucket, RECENT_UPLOAD_LIMIT),
+        ),
+      )
+    )
+      .flat()
+      .filter(
+        (object) =>
+          canViewAllUploads(identity) ||
+          metadataUploader(object.metadata) === identity.userId,
+      )
+      .sort(
+        (left, right) =>
+          (right.lastModified?.getTime() ?? 0) -
+          (left.lastModified?.getTime() ?? 0),
+      )
+      .slice(0, RECENT_UPLOAD_LIMIT);
     const uploads = await Promise.all(
       stored.map((object) => buildRecentUpload(object, qdrant)),
     );
-    uploads.sort((left, right) =>
-      (right.uploadedAt ?? '').localeCompare(left.uploadedAt ?? ''),
-    );
-
     const response: RecentUploadsResponse = {
       ok: true,
       uploads,

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import Link from 'next/link';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -298,14 +299,13 @@ export function UploadPanel({ products }: Props) {
               <p className="font-mono text-xs uppercase tracking-wider">Keycloak boundary prepared</p>
               <p className="text-xs text-[color:var(--color-neutral-400)]">Runtime configuration required</p>
             </div>
-            <button
-              type="button"
-              disabled
-              aria-label="Sign out will be available after authentication is connected"
-              className="grid h-10 w-10 place-items-center border border-[color:var(--color-neutral-700)] text-[color:var(--color-neutral-400)] disabled:cursor-not-allowed disabled:opacity-60"
+            <Link
+              href="/api/auth/signout"
+              aria-label="Sign out"
+              className="grid h-10 w-10 place-items-center border border-[color:var(--color-neutral-700)] text-[color:var(--color-neutral-400)] hover:border-[color:var(--color-signal)] hover:text-[color:var(--color-signal)]"
             >
               <LogOut aria-hidden="true" className="h-4 w-4" />
-            </button>
+            </Link>
           </div>
         </div>
       </header>

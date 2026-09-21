@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListAdminUploadBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::auraplex-raw-pdf",
+        "arn:aws:s3:::auraplex-raw-image",
+        "arn:aws:s3:::auraplex-raw-video"
+      ]
+    },
+    {
+      "Sid": "ReadAndWriteAdminUploadObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::auraplex-raw-pdf/*",
+        "arn:aws:s3:::auraplex-raw-image/*",
+        "arn:aws:s3:::auraplex-raw-video/*"
+      ]
+    }
+  ]
+}

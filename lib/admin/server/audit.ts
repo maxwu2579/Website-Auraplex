@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 export interface UploadAuditEvent {
   user: string;
   action: 'upload.accepted' | 'upload.failed';
@@ -18,9 +20,9 @@ export const jsonAuditLogger: AuditLogger = {
 };
 
 export function requestIp(headers: Headers): string {
-  return (
-    headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    headers.get('x-real-ip')?.trim() ||
-    'unknown'
-  );
+  const candidates = [
+    headers.get('x-forwarded-for')?.split(',')[0]?.trim(),
+    headers.get('x-real-ip')?.trim(),
+  ];
+  return candidates.find((candidate) => candidate && isIP(candidate)) || 'unknown';
 }

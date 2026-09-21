@@ -37,6 +37,14 @@ export function canUpload(
   return identity.roles.some((role) => allowed.has(normalizedRole(role)));
 }
 
+export function canViewAllUploads(
+  identity: AdminIdentity,
+  mapping: AdminRoleMapping = getAdminRoleMapping(),
+): boolean {
+  const adminRole = normalizedRole(mapping.admin);
+  return identity.roles.some((role) => normalizedRole(role) === adminRole);
+}
+
 export function requireUploadPermission(
   identity: AdminIdentity | null,
   mapping?: AdminRoleMapping,
@@ -70,11 +78,15 @@ export async function authenticateAdminRequest(): Promise<AdminIdentity> {
   return requireUploadPermission(identityFromSession(await auth()));
 }
 
-export function extractKeycloakRoles(profile: unknown): string[] {
+export function extractKeycloakRoles(
+  profile: unknown,
+  clientId?: string,
+): string[] {
   if (!profile || typeof profile !== 'object') return [];
   const value = profile as {
     groups?: unknown;
     realm_access?: { roles?: unknown };
+    resource_access?: Record<string, { roles?: unknown }>;
   };
   const groups = Array.isArray(value.groups)
     ? value.groups.filter((item): item is string => typeof item === 'string')
@@ -84,5 +96,10 @@ export function extractKeycloakRoles(profile: unknown): string[] {
         (item): item is string => typeof item === 'string',
       )
     : [];
-  return Array.from(new Set([...groups, ...roles]));
+  const clientRoles = clientId && Array.isArray(value.resource_access?.[clientId]?.roles)
+    ? value.resource_access[clientId].roles.filter(
+        (item): item is string => typeof item === 'string',
+      )
+    : [];
+  return Array.from(new Set([...groups, ...roles, ...clientRoles]));
 }

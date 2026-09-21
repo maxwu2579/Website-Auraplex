@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Readable } from 'node:stream';
 import { NextRequest } from 'next/server';
-import { PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+} from '@aws-sdk/client-s3';
 import {
   MAX_UPLOAD_BYTES,
   type UploadApiResponse,
@@ -22,10 +26,15 @@ import {
 import { deriveUploadStatus } from '../lib/admin/server/status';
 import { canRetryUpload, queueStatusAfterResponse } from '../lib/admin/upload-ui-state';
 
-function uploadRequest(contentLength = 4) {
+const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\ncomplete-pdf-body');
+
+function uploadRequest(
+  contentLength = PDF_BYTES.byteLength,
+  body: Uint8Array = PDF_BYTES,
+) {
   return new NextRequest('http://localhost/api/admin/uploads', {
     method: 'PUT',
-    body: new Uint8Array([1, 2, 3, 4]),
+    body: body.slice().buffer as ArrayBuffer,
     headers: {
       'content-length': String(contentLength),
       'content-type': 'application/pdf',
@@ -78,17 +87,36 @@ test('streams request bytes through the limiter and maps MinIO input', async () 
   const body = (await response.json()) as UploadApiResponse;
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
-  assert.equal(receivedBytes, 4);
+  assert.equal(receivedBytes, PDF_BYTES.byteLength);
   assert.equal(captured?.bucket, 'auraplex-raw-pdf');
   assert.equal(captured?.key, 'labelling/flexy-applicator/product-manual.pdf');
   assert.equal(captured?.metadata['product-line'], 'labelling');
   assert.equal(captured?.metadata['product-id'], '6470625');
   assert.equal(captured?.metadata['safe-filename'], 'product-manual.pdf');
   assert.equal(captured?.metadata['upload-id'], 'upload-123');
+  assert.equal(captured?.metadata['uploaded-by'], 'user-1');
   if (body.ok) {
     assert.equal(body.status, 'pending');
     assert.equal(body.sourceKey, 'labelling/flexy-applicator/product-manual.pdf');
   }
+});
+
+test('upload service rejects a body shorter than the declared Content-Length', async () => {
+  const storage: StorageAdapter = {
+    async putObject(input) {
+      for await (const _chunk of input.body) {
+        // Drain to trigger the counting stream flush check.
+      }
+      return {};
+    },
+    async listObjects() { return []; },
+  };
+  const response = await putUpload(
+    uploadRequest(PDF_BYTES.byteLength + 1),
+    dependencies(storage),
+  );
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).code, 'SIZE_MISMATCH');
 });
 
 test('does not return success before storage confirms acceptance', async () => {
@@ -183,6 +211,41 @@ test('S3 adapter sends a PutObjectCommand with the supplied stream metadata', as
   assert.equal(command.input.Metadata?.['product-id'], '123');
 });
 
+test('S3 listing follows continuation tokens and returns newest objects first', async () => {
+  const listTokens: Array<string | undefined> = [];
+  const adapter = new S3StorageAdapter({
+    send: async (command: unknown) => {
+      if (command instanceof ListObjectsV2Command) {
+        listTokens.push(command.input.ContinuationToken);
+        if (!command.input.ContinuationToken) {
+          return {
+            IsTruncated: true,
+            NextContinuationToken: 'next-page',
+            Contents: [{
+              Key: 'older.pdf',
+              Size: 1,
+              LastModified: new Date('2026-09-20T10:00:00Z'),
+            }],
+          };
+        }
+        return {
+          IsTruncated: false,
+          Contents: [{
+            Key: 'newer.pdf',
+            Size: 2,
+            LastModified: new Date('2026-09-21T10:00:00Z'),
+          }],
+        };
+      }
+      assert.ok(command instanceof HeadObjectCommand);
+      return { Metadata: { 'uploaded-by': 'user-1' } };
+    },
+  } as never);
+  const objects = await adapter.listObjects('auraplex-raw-pdf', 2);
+  assert.deepEqual(listTokens, [undefined, 'next-page']);
+  assert.deepEqual(objects.map((object) => object.key), ['newer.pdf', 'older.pdf']);
+});
+
 test('status mapping never treats missing Qdrant evidence as failed', () => {
   assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'deferred', processedEvidence: false }), 'queued');
   assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'supported', processedEvidence: false }), 'pending');
@@ -207,33 +270,62 @@ test('Qdrant adapter filters by the isolated relative source key', async () => {
   assert.equal(filterValue, 'labelling/flexy-applicator/manual.pdf');
 });
 
-test('GET status combines stored objects with optional Qdrant evidence', async () => {
+test('GET status gives uploaders own objects only and admins all objects', async () => {
   const storage: StorageAdapter = {
     async putObject() { return {}; },
     async listObjects(bucket) {
       return bucket === 'auraplex-raw-pdf'
-        ? [{
-            bucket,
-            key: 'labelling/flexy-applicator/manual.pdf',
-            size: 10,
-            lastModified: new Date('2026-09-21T10:00:00Z'),
-            metadata: { 'upload-id': 'saved-id' },
-          }]
+        ? [
+            {
+              bucket,
+              key: 'labelling/flexy-applicator/own.pdf',
+              size: 10,
+              lastModified: new Date('2026-09-21T10:00:00Z'),
+              metadata: { 'upload-id': 'own-id', 'uploaded-by': 'user-1' },
+            },
+            {
+              bucket,
+              key: 'labelling/flexy-applicator/other.pdf',
+              size: 10,
+              lastModified: new Date('2026-09-21T11:00:00Z'),
+              metadata: { 'upload-id': 'other-id', 'uploaded-by': 'user-2' },
+            },
+            {
+              bucket,
+              key: 'labelling/flexy-applicator/legacy.pdf',
+              size: 10,
+              lastModified: new Date('2026-09-21T12:00:00Z'),
+              metadata: { 'upload-id': 'legacy-id' } as Record<string, string>,
+            },
+          ]
         : [];
     },
   };
   const qdrant: QdrantEvidenceAdapter = {
     async hasProcessedEvidence() { return true; },
   };
-  const response = await getUploads(
+  const uploaderResponse = await getUploads(
     new Request('http://localhost/api/admin/uploads'),
     dependencies(storage, { qdrant: () => qdrant }),
   );
-  const body = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(body.uploads[0].status, 'processed');
-  assert.equal(body.uploads[0].uploadId, 'saved-id');
-  assert.equal(body.qdrantAvailable, true);
+  const uploaderBody = await uploaderResponse.json();
+  assert.equal(uploaderResponse.status, 200);
+  assert.deepEqual(uploaderBody.uploads.map((item: { uploadId: string }) => item.uploadId), ['own-id']);
+  assert.equal(uploaderBody.uploads[0].status, 'processed');
+  assert.equal(uploaderBody.qdrantAvailable, true);
+
+  const adminResponse = await getUploads(
+    new Request('http://localhost/api/admin/uploads'),
+    dependencies(storage, {
+      authenticate: async () => ({ userId: 'admin-1', roles: ['Admin'] }),
+      qdrant: () => qdrant,
+    }),
+  );
+  const adminBody = await adminResponse.json();
+  assert.deepEqual(
+    adminBody.uploads.map((item: { uploadId: string }) => item.uploadId),
+    ['legacy-id', 'other-id', 'own-id'],
+  );
 });
 
 test('frontend response mapping never treats a 503 error body as uploaded', () => {

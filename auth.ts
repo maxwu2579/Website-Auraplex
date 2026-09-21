@@ -25,7 +25,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     : [],
   callbacks: {
     jwt({ token, profile }) {
-      if (profile) token.roles = extractKeycloakRoles(profile);
+      if (profile) token.roles = extractKeycloakRoles(profile, keycloak?.clientId);
       return token;
     },
     session({ session, token }) {

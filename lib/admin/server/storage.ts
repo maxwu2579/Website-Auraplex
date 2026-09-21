@@ -58,15 +58,40 @@ export class S3StorageAdapter implements StorageAdapter {
   }
 
   async listObjects(bucket: UploadBucket, limit = 50): Promise<StoredObject[]> {
-    const output = await this.client.send(
-      new ListObjectsV2Command({ Bucket: bucket, MaxKeys: limit }),
+    const objects: Array<{
+      Key: string;
+      Size?: number;
+      LastModified?: Date;
+    }> = [];
+    let continuationToken: string | undefined;
+
+    do {
+      const output = await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          MaxKeys: 1_000,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      objects.push(
+        ...(output.Contents ?? []).filter(
+          (item): item is typeof item & { Key: string } => Boolean(item.Key),
+        ),
+      );
+      continuationToken = output.IsTruncated
+        ? output.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+
+    objects.sort(
+      (left, right) =>
+        (right.LastModified?.getTime() ?? 0) -
+        (left.LastModified?.getTime() ?? 0),
     );
-    const objects = (output.Contents ?? []).filter(
-      (item): item is typeof item & { Key: string } => Boolean(item.Key),
-    );
+    const recent = objects.slice(0, Math.max(0, limit));
 
     return Promise.all(
-      objects.map(async (item) => {
+      recent.map(async (item) => {
         const head = await this.client.send(
           new HeadObjectCommand({ Bucket: bucket, Key: item.Key }),
         );

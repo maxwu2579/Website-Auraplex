@@ -162,6 +162,7 @@ export function validateDeclaredSize(rawContentLength: string | null): number {
  */
 export function createUploadByteLimitStream(
   maxBytes: number = MAX_UPLOAD_BYTES,
+  expectedBytes?: number,
 ): TransformStream<Uint8Array, Uint8Array> {
   let receivedBytes = 0;
 
@@ -175,7 +176,23 @@ export function createUploadByteLimitStream(
           'Received file data exceeds the 500 MB limit',
         );
       }
+      if (expectedBytes !== undefined && receivedBytes > expectedBytes) {
+        throw new UploadContractError(
+          400,
+          'SIZE_MISMATCH',
+          'Received file size does not match Content-Length',
+        );
+      }
       controller.enqueue(chunk);
+    },
+    flush() {
+      if (expectedBytes !== undefined && receivedBytes !== expectedBytes) {
+        throw new UploadContractError(
+          400,
+          'SIZE_MISMATCH',
+          'Received file size does not match Content-Length',
+        );
+      }
     },
   });
 }
@@ -214,6 +231,9 @@ export function buildUploadObjectLocation(input: {
     throw new UploadContractError(400, 'INVALID_FILENAME', 'Filename is not safe');
   }
 
+  // Deliberately deterministic: the same product and sanitized filename maps
+  // to the same key, so S3/MinIO currently overwrites that object. Versioning
+  // semantics require product-owner confirmation before this rule changes.
   const key = [input.productLine, input.productSlug, input.safeFilename].join('/');
   const location = {
     bucket: input.media.bucket,

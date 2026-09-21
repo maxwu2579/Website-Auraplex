@@ -33,6 +33,9 @@ job "website" {
         NEXT_PUBLIC_CHAT_API_URL     = "https://chat-api.auraplex.info"
         NEXT_PUBLIC_PLAUSIBLE_DOMAIN = "auraplex.info"
         # Sanity / Resend / Anthropic keys added by ops via templates + nomadVar.
+        # Admin-upload secrets and service addresses must also be injected via
+        # templates + nomadVar. The production variable path is intentionally
+        # not guessed here; see docs/deployment/AURA-INT-001-runtime.md.
       }
 
       resources {

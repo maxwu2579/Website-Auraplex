@@ -19,6 +19,12 @@ import {
   createUploadErrorBody,
   UploadContractError,
 } from '../lib/admin/upload-errors';
+import { sniffUploadStream } from '../lib/admin/server/mime-sniff';
+
+const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\ncomplete-pdf-body');
+const PNG_BYTES = new Uint8Array([
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+]);
 
 function expectContractError(
   callback: () => unknown,
@@ -175,6 +181,101 @@ test('counts streamed bytes without buffering the complete upload', async () => 
     assert.equal(error.status, 413);
     return true;
   });
+});
+
+test('rejects declared and actual byte count mismatches with a stable 400', async () => {
+  for (const chunks of [[new Uint8Array(4)], [new Uint8Array(2)]]) {
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    const reader = source.pipeThrough(createUploadByteLimitStream(10, 3)).getReader();
+    await assert.rejects(async () => {
+      while (!(await reader.read()).done) {
+        // Drain the stream so both overflow and short-body checks execute.
+      }
+    }, (error: unknown) => {
+      assert.ok(error instanceof UploadContractError);
+      assert.equal(error.code, 'SIZE_MISMATCH');
+      assert.equal(error.status, 400);
+      return true;
+    });
+  }
+});
+
+test('sniffs valid PDF and image signatures and preserves every stream byte', async () => {
+  const cases = [
+    { bytes: PDF_BYTES, mime: 'application/pdf', filename: 'manual.pdf' },
+    { bytes: PNG_BYTES, mime: 'image/png', filename: 'diagram.png' },
+  ];
+
+  for (const item of cases) {
+    const midpoint = Math.floor(item.bytes.byteLength / 2);
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(item.bytes.slice(0, midpoint));
+        controller.enqueue(item.bytes.slice(midpoint));
+        controller.close();
+      },
+    });
+    const sniffed = await sniffUploadStream(
+      source,
+      resolveUploadMedia(item.mime, item.filename),
+    );
+    const received: number[] = [];
+    const reader = sniffed.stream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received.push(...value);
+    }
+    assert.equal(sniffed.detected.mime, item.mime);
+    assert.deepEqual(received, Array.from(item.bytes));
+  }
+});
+
+test('rejects MIME spoofing and unsupported binary content', async () => {
+  await assert.rejects(
+    sniffUploadStream(
+      new Blob([PNG_BYTES]).stream(),
+      resolveUploadMedia('application/pdf', 'manual.pdf'),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof UploadContractError);
+      assert.equal(error.code, 'MIME_MISMATCH');
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    sniffUploadStream(
+      new Blob([new Uint8Array([1, 2, 3, 4, 5])]).stream(),
+      resolveUploadMedia('application/pdf', 'manual.pdf'),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof UploadContractError);
+      assert.equal(error.code, 'UNSUPPORTED_MEDIA_TYPE');
+      return true;
+    },
+  );
+
+  const asfHeader = new Uint8Array([
+    0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11,
+    0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c,
+  ]);
+  await assert.rejects(
+    sniffUploadStream(
+      new Blob([asfHeader]).stream(),
+      resolveUploadMedia('video/mp4', 'demo.mp4'),
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof UploadContractError);
+      assert.equal(error.code, 'UNSUPPORTED_MEDIA_TYPE');
+      return true;
+    },
+  );
 });
 
 test('rejects missing and malformed content lengths', () => {

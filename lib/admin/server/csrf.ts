@@ -3,6 +3,18 @@ import { UploadContractError } from '@/lib/admin/upload-errors';
 import { UPLOAD_HEADERS } from '@/lib/admin/upload-contract';
 
 export const ADMIN_CSRF_COOKIE = 'auraplex-admin-csrf';
+export const ADMIN_CSRF_COOKIE_PATH = '/api/admin';
+export const ADMIN_CSRF_MAX_AGE_SECONDS = 60 * 60;
+
+export function adminCsrfCookieOptions(production: boolean) {
+  return {
+    httpOnly: true,
+    sameSite: 'strict' as const,
+    secure: production,
+    path: ADMIN_CSRF_COOKIE_PATH,
+    maxAge: ADMIN_CSRF_MAX_AGE_SECONDS,
+  };
+}
 
 export interface CsrfValidator {
   verify(request: Request): void | Promise<void>;
