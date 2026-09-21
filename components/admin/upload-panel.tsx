@@ -17,8 +17,11 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/primitives/button';
 import type { Category } from '@/lib/catalog';
+import {
+  MAX_UPLOAD_BYTES,
+  type UiUploadQueueStatus,
+} from '@/lib/admin/upload-contract';
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = new Set([
   'pdf',
   'docx',
@@ -55,6 +58,7 @@ type QueuedFile = {
   file: File;
   extension: string;
   ingestion: 'supported' | 'deferred';
+  status: UiUploadQueueStatus;
 };
 
 type Props = {
@@ -124,7 +128,7 @@ export function UploadPanel({ products }: Props) {
         rejected.push(`${file.name}: empty file`);
         continue;
       }
-      if (file.size > MAX_FILE_SIZE) {
+      if (file.size > MAX_UPLOAD_BYTES) {
         rejected.push(`${file.name}: exceeds 500 MB`);
         continue;
       }
@@ -134,6 +138,7 @@ export function UploadPanel({ products }: Props) {
         file,
         extension,
         ingestion: extension === 'pdf' ? 'supported' : 'deferred',
+        status: 'ready',
       });
     }
 

@@ -10,6 +10,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/admin-upload.test.ts",
     "sanity:dev": "sanity dev",
     "sanity:deploy": "sanity deploy",
     "seed": "tsx scripts/seed.ts",
