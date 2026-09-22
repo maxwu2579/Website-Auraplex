@@ -15,6 +15,7 @@ import {
 import {
   authenticateAdminRequest,
   canViewAllUploads,
+  requireUploadPermission,
   type AdminIdentity,
 } from '@/lib/admin/server/authorization';
 import {
@@ -41,6 +42,7 @@ import {
 } from '@/lib/admin/server/storage';
 import { buildRecentUpload } from '@/lib/admin/server/status';
 import { sniffUploadStream } from '@/lib/admin/server/mime-sniff';
+import { UPLOAD_METADATA } from '@/lib/admin/server/object-metadata';
 
 const RECENT_UPLOAD_LIMIT = 50;
 
@@ -96,7 +98,7 @@ export async function putUpload(
   let auditSize = 0;
 
   try {
-    identity = await dependencies.authenticate();
+    identity = requireUploadPermission(await dependencies.authenticate());
     if (!request.body) {
       return json(
         { ok: false, code: 'MALFORMED_REQUEST', error: 'A raw file body is required' },
@@ -113,10 +115,12 @@ export async function putUpload(
     auditSize = prepared.metadata.declaredSize;
     const countedWebStream = request.body.pipeThrough(
       createUploadByteLimitStream(undefined, prepared.metadata.declaredSize),
+      { signal: request.signal },
     );
     const sniffed = await sniffUploadStream(countedWebStream, prepared.media);
     const nodeStream = Readable.fromWeb(
       sniffed.stream as unknown as NodeReadableStream<Uint8Array>,
+      { signal: request.signal },
     );
 
     await dependencies.storage().putObject({
@@ -125,15 +129,16 @@ export async function putUpload(
       body: nodeStream,
       contentLength: prepared.metadata.declaredSize,
       contentType: prepared.media.canonicalMimeType,
+      signal: request.signal,
       metadata: {
-        'upload-id': uploadId,
-        'product-line': prepared.metadata.productLine,
-        'product-id': prepared.metadata.productId,
-        'original-filename': encodeURIComponent(prepared.metadata.originalFilename),
-        'safe-filename': prepared.safeFilename,
-        'mime-type': prepared.media.canonicalMimeType,
-        'ingestion-capability': prepared.media.ingestionCapability,
-        'uploaded-by': encodeURIComponent(identity.userId),
+        [UPLOAD_METADATA.uploadId]: uploadId,
+        [UPLOAD_METADATA.productLine]: prepared.metadata.productLine,
+        [UPLOAD_METADATA.productId]: prepared.metadata.productId,
+        [UPLOAD_METADATA.originalFilename]: encodeURIComponent(prepared.metadata.originalFilename),
+        [UPLOAD_METADATA.safeFilename]: prepared.safeFilename,
+        [UPLOAD_METADATA.mimeType]: prepared.media.canonicalMimeType,
+        [UPLOAD_METADATA.ingestionCapability]: prepared.media.ingestionCapability,
+        [UPLOAD_METADATA.uploadedBy]: encodeURIComponent(identity.userId),
       },
     });
 
@@ -152,7 +157,7 @@ export async function putUpload(
       bucket: prepared.location.bucket,
       key: prepared.location.key,
       sourceKey: prepared.location.sourceKey,
-      status: prepared.media.ingestionCapability === 'supported' ? 'pending' : 'queued',
+      status: 'pending',
     };
     return json(response);
   } catch (error) {
@@ -171,7 +176,7 @@ export async function putUpload(
 }
 
 function metadataUploader(metadata: Record<string, string>): string | null {
-  const stored = metadata['uploaded-by'];
+  const stored = metadata[UPLOAD_METADATA.uploadedBy];
   if (!stored) return null;
   try {
     return decodeURIComponent(stored);
@@ -185,7 +190,7 @@ export async function getUploads(
   dependencies: UploadServiceDependencies = defaultDependencies,
 ): Promise<Response> {
   try {
-    const identity = await dependencies.authenticate();
+    const identity = requireUploadPermission(await dependencies.authenticate());
     const storage = dependencies.storage();
     const qdrant = dependencies.qdrant();
     const stored = (

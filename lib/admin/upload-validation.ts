@@ -1,6 +1,7 @@
 import { MACHINES, PRODUCT_CATEGORIES, type Category } from '@/lib/catalog';
 import {
   MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_MB,
   UPLOAD_HEADERS,
   UPLOAD_MEDIA_ROUTES,
   type ProductLine,
@@ -149,7 +150,7 @@ export function validateDeclaredSize(rawContentLength: string | null): number {
     throw new UploadContractError(
       413,
       'FILE_TOO_LARGE',
-      'File exceeds the 500 MB limit',
+      `File exceeds the ${MAX_UPLOAD_MB} MB limit`,
     );
   }
   return size;
@@ -173,7 +174,7 @@ export function createUploadByteLimitStream(
         throw new UploadContractError(
           413,
           'FILE_TOO_LARGE',
-          'Received file data exceeds the 500 MB limit',
+          `Received file data exceeds the ${MAX_UPLOAD_MB} MB limit`,
         );
       }
       if (expectedBytes !== undefined && receivedBytes > expectedBytes) {

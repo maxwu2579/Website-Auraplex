@@ -6,6 +6,7 @@ import {
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import {
   MAX_UPLOAD_BYTES,
@@ -17,13 +18,15 @@ import {
   QdrantRestEvidenceAdapter,
   type QdrantEvidenceAdapter,
 } from '../lib/admin/server/qdrant';
-import { S3StorageAdapter, type StorageAdapter } from '../lib/admin/server/storage';
+import { createStorageAdapter, S3StorageAdapter, type StorageAdapter } from '../lib/admin/server/storage';
 import {
   getUploads,
   putUpload,
   type UploadServiceDependencies,
 } from '../lib/admin/server/upload-service';
 import { deriveUploadStatus } from '../lib/admin/server/status';
+import { deleteUpload, type DeleteDependencies } from '../lib/admin/server/delete-service';
+import { UPLOAD_METADATA } from '../lib/admin/server/object-metadata';
 import { canRetryUpload, queueStatusAfterResponse } from '../lib/admin/upload-ui-state';
 
 const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\ncomplete-pdf-body');
@@ -55,7 +58,7 @@ function dependencies(
     authenticate: async () => ({
       userId: 'user-1',
       email: 'user@example.test',
-      roles: ['Uploader'],
+      groups: ['Uploader'],
     }),
     csrf: { verify() {} },
     rateLimiter: { consume() {} },
@@ -81,6 +84,7 @@ test('streams request bytes through the limiter and maps MinIO input', async () 
     async listObjects() {
       return [];
     },
+    async deleteObject() {},
   };
 
   const response = await putUpload(uploadRequest(), dependencies(storage));
@@ -110,6 +114,7 @@ test('upload service rejects a body shorter than the declared Content-Length', a
       return {};
     },
     async listObjects() { return []; },
+    async deleteObject() {},
   };
   const response = await putUpload(
     uploadRequest(PDF_BYTES.byteLength + 1),
@@ -128,6 +133,7 @@ test('does not return success before storage confirms acceptance', async () => {
       return {};
     },
     async listObjects() { return []; },
+    async deleteObject() {},
   };
   let settled = false;
   const pending = putUpload(uploadRequest(), dependencies(storage)).then((value) => {
@@ -145,6 +151,7 @@ test('maps storage failure to a stable 500 response', async () => {
   const storage: StorageAdapter = {
     async putObject() { throw new Error('internal endpoint detail'); },
     async listObjects() { return []; },
+    async deleteObject() {},
   };
   const response = await putUpload(uploadRequest(), dependencies(storage));
   assert.equal(response.status, 500);
@@ -159,6 +166,7 @@ test('upload service returns 401 and 403 from the authentication boundary', asyn
   const storage: StorageAdapter = {
     async putObject() { return {}; },
     async listObjects() { return []; },
+    async deleteObject() {},
   };
   for (const expected of [
     new UploadContractError(401, 'UNAUTHENTICATED', 'Authentication is required'),
@@ -175,11 +183,87 @@ test('upload service returns 401 and 403 from the authentication boundary', asyn
   }
 });
 
+test('GET and DELETE independently reject missing sessions', async () => {
+  const anonymous = async (): Promise<never> => { throw new UploadContractError(401, 'UNAUTHENTICATED', 'Authentication is required'); };
+  const storage: StorageAdapter = {
+    async putObject() { throw new Error('storage must not be reached'); },
+    async listObjects() { throw new Error('storage must not be reached'); },
+    async deleteObject() { throw new Error('storage must not be reached'); },
+  };
+  assert.equal((await getUploads(new Request('http://localhost/api/admin/uploads'), dependencies(storage, { authenticate: anonymous }))).status, 401);
+  assert.equal((await deleteUpload(deleteRequest(), deleteDependencies({ authenticate: anonymous, storage: () => storage }))).status, 401);
+});
+
+test('accepted non-PDF files are stored and remain pending', async () => {
+  const docx = new Uint8Array(30 + 17);
+  docx.set([0x50, 0x4b, 0x03, 0x04], 0);
+  docx[26] = 17;
+  docx.set(new TextEncoder().encode('word/document.xml'), 30);
+  const cases = [
+    { name: 'manual.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: docx, bucket: 'auraplex-raw-pdf' },
+    { name: 'diagram.png', mime: 'image/png', bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]), bucket: 'auraplex-raw-image' },
+    { name: 'photo.jpg', mime: 'image/jpeg', bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0]), bucket: 'auraplex-raw-image' },
+    { name: 'demo.mp4', mime: 'video/mp4', bytes: new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]), bucket: 'auraplex-raw-video' },
+  ];
+  for (const item of cases) {
+    let saved: Parameters<StorageAdapter['putObject']>[0] | undefined;
+    const storage: StorageAdapter = {
+      async putObject(input) { saved = input; for await (const _chunk of input.body) { /* drain */ } return {}; },
+      async listObjects() { return []; },
+      async deleteObject() {},
+    };
+    const request = new Request('http://localhost/api/admin/uploads', {
+      method: 'PUT', body: item.bytes.slice().buffer,
+      headers: {
+        'content-length': String(item.bytes.length), 'content-type': item.mime,
+        'x-csrf-token': 'test', 'x-product-id': '6470625', 'x-product-line': 'labelling',
+        'x-upload-filename': encodeURIComponent(item.name),
+      },
+    });
+    const response = await putUpload(request, dependencies(storage));
+    assert.equal(response.status, 200, item.name);
+    assert.equal((await response.json()).status, 'pending');
+    assert.equal(saved?.bucket, item.bucket);
+    assert.equal(saved?.metadata[UPLOAD_METADATA.ingestionCapability], 'deferred');
+  }
+});
+
+test('browser cancellation is propagated to the storage adapter', async () => {
+  const controller = new AbortController();
+  let sawStorage = false;
+  const storage: StorageAdapter = {
+    async putObject(input) {
+      sawStorage = true;
+      assert.equal(input.signal, controller.signal);
+      await new Promise<void>((_resolve, reject) => {
+        input.signal?.addEventListener('abort', () => reject(new Error('upstream aborted')), { once: true });
+        controller.abort();
+      });
+      return {};
+    },
+    async listObjects() { return []; },
+    async deleteObject() {},
+  };
+  const request = new Request('http://localhost/api/admin/uploads', {
+    method: 'PUT', body: PDF_BYTES.slice().buffer,
+    signal: controller.signal,
+    headers: {
+      'content-length': String(PDF_BYTES.length), 'content-type': 'application/pdf',
+      'x-csrf-token': 'test', 'x-product-id': '6470625', 'x-product-line': 'labelling',
+      'x-upload-filename': encodeURIComponent('manual.pdf'),
+    },
+  });
+  const response = await putUpload(request, dependencies(storage));
+  assert.equal(sawStorage, true);
+  assert.notEqual(response.status, 200);
+});
+
 test('rejects oversized declarations before opening storage', async () => {
   let storageUsed = false;
   const storage: StorageAdapter = {
     async putObject() { storageUsed = true; return {}; },
     async listObjects() { return []; },
+    async deleteObject() {},
   };
   const response = await putUpload(
     uploadRequest(MAX_UPLOAD_BYTES + 1),
@@ -191,12 +275,15 @@ test('rejects oversized declarations before opening storage', async () => {
 
 test('S3 adapter sends a PutObjectCommand with the supplied stream metadata', async () => {
   let command: unknown;
+  let passedSignal: AbortSignal | undefined;
   const adapter = new S3StorageAdapter({
-    send: async (value: unknown) => {
+    send: async (value: unknown, options?: { abortSignal?: AbortSignal }) => {
       command = value;
+      passedSignal = options?.abortSignal;
       return { ETag: 'etag' };
     },
   } as never);
+  const controller = new AbortController();
   await adapter.putObject({
     bucket: 'auraplex-raw-pdf',
     key: 'labelling/product/manual.pdf',
@@ -204,11 +291,32 @@ test('S3 adapter sends a PutObjectCommand with the supplied stream metadata', as
     contentLength: 3,
     contentType: 'application/pdf',
     metadata: { 'product-id': '123' },
+    signal: controller.signal,
   });
   assert.ok(command instanceof PutObjectCommand);
   assert.equal(command.input.Bucket, 'auraplex-raw-pdf');
   assert.equal(command.input.Key, 'labelling/product/manual.pdf');
   assert.equal(command.input.Metadata?.['product-id'], '123');
+  assert.equal(passedSignal, controller.signal);
+  controller.abort();
+  assert.equal(passedSignal.aborted, true);
+});
+
+test('S3 adapter sends a DeleteObjectCommand for the exact bucket and key', async () => {
+  let command: unknown;
+  const adapter = new S3StorageAdapter({ send: async (value: unknown) => { command = value; return {}; } } as never);
+  await adapter.deleteObject('auraplex-raw-pdf', 'labelling/flexy-applicator/manual.pdf');
+  assert.ok(command instanceof DeleteObjectCommand);
+  assert.equal(command.input.Key, 'labelling/flexy-applicator/manual.pdf');
+});
+
+test('MinIO client keeps path-style addressing enabled', () => {
+  const adapter = createStorageAdapter({
+    endpoint: 'http://minio.example.test:9000',
+    region: 'us-east-1', accessKey: 'test-only', secretKey: 'test-only',
+  });
+  const client = (adapter as unknown as { client: { config: { forcePathStyle: boolean } } }).client;
+  assert.equal(client.config.forcePathStyle, true);
 });
 
 test('S3 listing follows continuation tokens and returns newest objects first', async () => {
@@ -247,11 +355,11 @@ test('S3 listing follows continuation tokens and returns newest objects first', 
 });
 
 test('status mapping never treats missing Qdrant evidence as failed', () => {
-  assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'deferred', processedEvidence: false }), 'queued');
+  assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'deferred', processedEvidence: false }), 'pending');
   assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'supported', processedEvidence: false }), 'pending');
   assert.equal(deriveUploadStatus({ stored: true, ingestionCapability: 'supported', processedEvidence: true }), 'processed');
-  assert.equal(deriveUploadStatus({ stored: false, ingestionCapability: 'supported', processedEvidence: false }), 'unknown');
-  assert.equal(deriveUploadStatus({ stored: true, processedEvidence: false }), 'unknown');
+  assert.equal(deriveUploadStatus({ stored: false, ingestionCapability: 'supported', processedEvidence: false }), 'unsupported');
+  assert.equal(deriveUploadStatus({ stored: true, processedEvidence: false }), 'unsupported');
 });
 
 test('Qdrant adapter filters by the isolated relative source key', async () => {
@@ -270,9 +378,28 @@ test('Qdrant adapter filters by the isolated relative source key', async () => {
   assert.equal(filterValue, 'labelling/flexy-applicator/manual.pdf');
 });
 
+test('Qdrant deletion waits for exact source-key filter completion', async () => {
+  let collection = '';
+  let options: unknown;
+  const qdrant = new QdrantRestEvidenceAdapter({
+    async delete(name: string, input: unknown) {
+      collection = name;
+      options = input;
+      return { status: 'completed' };
+    },
+  } as never, 'uploads');
+  await qdrant.deleteBySourceKey('labelling/flexy-applicator/manual.pdf');
+  assert.equal(collection, 'uploads');
+  assert.deepEqual(options, {
+    filter: { must: [{ key: 'source_key', match: { value: 'labelling/flexy-applicator/manual.pdf' } }] },
+    wait: true,
+  });
+});
+
 test('GET status gives uploaders own objects only and admins all objects', async () => {
   const storage: StorageAdapter = {
     async putObject() { return {}; },
+    async deleteObject() {},
     async listObjects(bucket) {
       return bucket === 'auraplex-raw-pdf'
         ? [
@@ -303,6 +430,7 @@ test('GET status gives uploaders own objects only and admins all objects', async
   };
   const qdrant: QdrantEvidenceAdapter = {
     async hasProcessedEvidence() { return true; },
+    async deleteBySourceKey() {},
   };
   const uploaderResponse = await getUploads(
     new Request('http://localhost/api/admin/uploads'),
@@ -317,7 +445,7 @@ test('GET status gives uploaders own objects only and admins all objects', async
   const adminResponse = await getUploads(
     new Request('http://localhost/api/admin/uploads'),
     dependencies(storage, {
-      authenticate: async () => ({ userId: 'admin-1', roles: ['Admin'] }),
+      authenticate: async () => ({ userId: 'admin-1', groups: ['Admin'] }),
       qdrant: () => qdrant,
     }),
   );
@@ -344,4 +472,78 @@ test('frontend response mapping never treats a 503 error body as uploaded', () =
   }), 'uploaded');
   assert.equal(canRetryUpload('failed'), true);
   assert.equal(canRetryUpload('uploaded'), false);
+});
+
+function deleteRequest(key = 'labelling/flexy-applicator/manual.pdf') {
+  return new Request('http://localhost/api/admin/uploads', {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ bucket: 'auraplex-raw-pdf', key }),
+  });
+}
+
+function deleteDependencies(overrides: Partial<DeleteDependencies> = {}): DeleteDependencies {
+  return {
+    authenticate: async () => ({ userId: 'admin-1', groups: ['Admin'] }),
+    csrf: { verify() {} },
+    storage: () => ({
+      async putObject() { return {}; },
+      async listObjects() { return []; },
+      async deleteObject() {},
+    }),
+    qdrant: () => ({ async hasProcessedEvidence() { return false; }, async deleteBySourceKey() {} }),
+    audit: { write() {} },
+    ...overrides,
+  };
+}
+
+test('Admin delete removes exact Qdrant source before the MinIO object', async () => {
+  const calls: string[] = [];
+  const target = 'labelling/flexy-applicator/manual.pdf';
+  const response = await deleteUpload(deleteRequest(target), deleteDependencies({
+    qdrant: () => ({ async hasProcessedEvidence() { return false; }, async deleteBySourceKey(key) { calls.push(`qdrant:${key}`); } }),
+    storage: () => ({ async putObject() { return {}; }, async listObjects() { return []; }, async deleteObject(bucket, key) { calls.push(`minio:${bucket}/${key}`); } }),
+  }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [`qdrant:${target}`, `minio:auraplex-raw-pdf/${target}`]);
+});
+
+test('Admin delete denies Uploader and rejects traversal before external operations', async () => {
+  let used = false;
+  const deps = deleteDependencies({
+    authenticate: async () => ({ userId: 'uploader', groups: ['Uploader'] }),
+    storage: () => { used = true; throw new Error('must not open storage'); },
+  });
+  assert.equal((await deleteUpload(deleteRequest(), deps)).status, 403);
+  assert.equal(used, false);
+  const invalid = await deleteUpload(deleteRequest('../manual.pdf'), deleteDependencies({
+    storage: () => { used = true; throw new Error('must not open storage'); },
+  }));
+  assert.equal(invalid.status, 400);
+  assert.equal(used, false);
+});
+
+test('Admin delete reports partial failure without leaking upstream details', async () => {
+  const response = await deleteUpload(deleteRequest(), deleteDependencies({
+    storage: () => ({ async putObject() { return {}; }, async listObjects() { return []; }, async deleteObject() { throw new Error('secret minio.internal bucket'); } }),
+  }));
+  assert.equal(response.status, 500);
+  const body = await response.json();
+  assert.equal(body.code, 'PARTIAL_DELETE');
+  assert.doesNotMatch(JSON.stringify(body), /secret|minio\.internal/i);
+});
+
+test('Admin delete does not remove MinIO when Qdrant cleanup fails', async () => {
+  let minioCalled = false;
+  const response = await deleteUpload(deleteRequest(), deleteDependencies({
+    qdrant: () => ({ async hasProcessedEvidence() { return false; }, async deleteBySourceKey() { throw new Error('secret qdrant.internal'); } }),
+    storage: () => ({ async putObject() { return {}; }, async listObjects() { return []; }, async deleteObject() { minioCalled = true; } }),
+  }));
+  assert.equal(response.status, 500);
+  assert.equal((await response.json()).code, 'INTERNAL_ERROR');
+  assert.equal(minioCalled, false);
+});
+
+test('stored object metadata uses the shared dash-case schema', () => {
+  for (const value of Object.values(UPLOAD_METADATA)) assert.match(value, /^[a-z]+(?:-[a-z]+)*$/);
 });

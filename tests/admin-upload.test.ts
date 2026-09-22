@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 import { PUT } from '../app/api/admin/uploads/route';
 import {
   MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_MB,
   UPLOAD_ERROR_STATUS,
   type ProductLine,
 } from '../lib/admin/upload-contract';
@@ -25,6 +26,16 @@ const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\ncomplete-pdf-body');
 const PNG_BYTES = new Uint8Array([
   137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
 ]);
+const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0]);
+const MP4_BYTES = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0]);
+const DOCX_BYTES = (() => {
+  const filename = new TextEncoder().encode('word/document.xml');
+  const bytes = new Uint8Array(30 + filename.byteLength);
+  bytes.set([0x50, 0x4b, 0x03, 0x04], 0);
+  bytes[26] = filename.byteLength;
+  bytes.set(filename, 30);
+  return bytes;
+})();
 
 function expectContractError(
   callback: () => unknown,
@@ -87,7 +98,8 @@ test('routes supported MIME types to the specified buckets', () => {
     'auraplex-raw-pdf',
   );
   assert.equal(resolveUploadMedia('image/jpeg', 'photo.jpg').bucket, 'auraplex-raw-image');
-  assert.equal(resolveUploadMedia('video/quicktime', 'demo.mov').bucket, 'auraplex-raw-video');
+  assert.equal(resolveUploadMedia('image/png', 'photo.png').bucket, 'auraplex-raw-image');
+  assert.equal(resolveUploadMedia('video/mp4', 'demo.mp4').bucket, 'auraplex-raw-video');
 });
 
 test('keeps storage acceptance separate from ingestion capability', () => {
@@ -106,6 +118,13 @@ test('rejects unsupported MIME types and extension mismatches', () => {
     'UNSUPPORTED_MEDIA_TYPE',
     415,
   );
+  for (const [mime, filename] of [
+    ['image/webp', 'photo.webp'],
+    ['video/webm', 'demo.webm'],
+    ['video/quicktime', 'demo.mov'],
+  ]) {
+    expectContractError(() => resolveUploadMedia(mime, filename), 'UNSUPPORTED_MEDIA_TYPE', 415);
+  }
 });
 
 test('builds the deterministic bucket and object key', () => {
@@ -140,6 +159,7 @@ test('rejects unsafe object key components', () => {
 });
 
 test('validates zero, exact-limit, and over-limit file sizes', () => {
+  assert.equal(MAX_UPLOAD_MB, 100);
   expectContractError(() => validateDeclaredSize('0'), 'EMPTY_FILE', 400);
   assert.equal(validateDeclaredSize(String(MAX_UPLOAD_BYTES)), MAX_UPLOAD_BYTES);
   expectContractError(
@@ -205,10 +225,13 @@ test('rejects declared and actual byte count mismatches with a stable 400', asyn
   }
 });
 
-test('sniffs valid PDF and image signatures and preserves every stream byte', async () => {
+test('sniffs every accepted signature and preserves every stream byte', async () => {
   const cases = [
     { bytes: PDF_BYTES, mime: 'application/pdf', filename: 'manual.pdf' },
+    { bytes: DOCX_BYTES, mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', filename: 'manual.docx' },
     { bytes: PNG_BYTES, mime: 'image/png', filename: 'diagram.png' },
+    { bytes: JPEG_BYTES, mime: 'image/jpeg', filename: 'photo.jpg' },
+    { bytes: MP4_BYTES, mime: 'video/mp4', filename: 'demo.mp4' },
   ];
 
   for (const item of cases) {
@@ -234,6 +257,32 @@ test('sniffs valid PDF and image signatures and preserves every stream byte', as
     assert.equal(sniffed.detected.mime, item.mime);
     assert.deepEqual(received, Array.from(item.bytes));
   }
+});
+
+test('replays the sniffed 4 KB plus the remaining streamed bytes', async () => {
+  const bytes = new Uint8Array(8_500);
+  bytes.set(PDF_BYTES, 0);
+  for (let index = PDF_BYTES.length; index < bytes.length; index += 1) bytes[index] = index % 251;
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let index = 0; index < bytes.length; index += 517) {
+        controller.enqueue(bytes.slice(index, index + 517));
+      }
+      controller.close();
+    },
+  });
+  const { stream } = await sniffUploadStream(source, resolveUploadMedia('application/pdf', 'manual.pdf'));
+  const received = new Uint8Array(bytes.length);
+  let offset = 0;
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received.set(value, offset);
+    offset += value.length;
+  }
+  assert.equal(offset, bytes.length);
+  assert.deepEqual(received, bytes);
 });
 
 test('rejects MIME spoofing and unsupported binary content', async () => {
@@ -293,11 +342,11 @@ test('rejects missing and malformed content lengths', () => {
 
 test('serializes stable API errors', () => {
   assert.deepEqual(
-    createUploadErrorBody('FILE_TOO_LARGE', 'File exceeds the 500 MB limit'),
+    createUploadErrorBody('FILE_TOO_LARGE', 'File exceeds the 100 MB limit'),
     {
       ok: false,
       code: 'FILE_TOO_LARGE',
-      error: 'File exceeds the 500 MB limit',
+      error: 'File exceeds the 100 MB limit',
     },
   );
   assert.equal(UPLOAD_ERROR_STATUS.UNAUTHENTICATED, 401);

@@ -6,7 +6,10 @@ import type {
 export function queueStatusAfterResponse(
   response: UploadApiResponse,
 ): UiUploadQueueStatus {
-  return response.ok ? 'uploaded' : 'failed';
+  if (response.ok) return 'uploaded';
+  return response.code === 'UNSUPPORTED_MEDIA_TYPE' || response.code === 'MIME_MISMATCH'
+    ? 'unsupported'
+    : 'failed';
 }
 
 export function canRetryUpload(status: UiUploadQueueStatus): boolean {

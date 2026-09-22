@@ -8,6 +8,7 @@ import {
 import { toQdrantSourceKey } from '@/lib/admin/source-key';
 import type { QdrantEvidenceAdapter } from '@/lib/admin/server/qdrant';
 import type { StoredObject } from '@/lib/admin/server/storage';
+import { UPLOAD_METADATA } from '@/lib/admin/server/object-metadata';
 
 export function deriveUploadStatus(input: {
   stored: boolean;
@@ -16,9 +17,9 @@ export function deriveUploadStatus(input: {
   explicitFailure?: boolean;
 }): UploadStatus {
   if (input.explicitFailure) return 'failed';
-  if (!input.stored) return 'unknown';
-  if (input.ingestionCapability === 'deferred') return 'queued';
-  if (input.ingestionCapability !== 'supported') return 'unknown';
+  if (!input.stored) return 'unsupported';
+  if (input.ingestionCapability === 'deferred') return 'pending';
+  if (input.ingestionCapability !== 'supported') return 'unsupported';
   return input.processedEvidence ? 'processed' : 'pending';
 }
 
@@ -42,7 +43,7 @@ export async function buildRecentUpload(
     : false;
 
   return {
-    uploadId: object.metadata['upload-id'] || fallbackUploadId(object),
+    uploadId: object.metadata[UPLOAD_METADATA.uploadId] || fallbackUploadId(object),
     bucket: object.bucket,
     key: object.key,
     sourceKey,

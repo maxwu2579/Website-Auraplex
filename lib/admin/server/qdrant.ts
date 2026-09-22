@@ -6,9 +6,10 @@ import {
 
 export interface QdrantEvidenceAdapter {
   hasProcessedEvidence(sourceKey: string): Promise<boolean>;
+  deleteBySourceKey(sourceKey: string): Promise<void>;
 }
 
-type QdrantScroller = Pick<QdrantClient, 'scroll'>;
+type QdrantScroller = Pick<QdrantClient, 'scroll' | 'delete'>;
 
 export class QdrantRestEvidenceAdapter implements QdrantEvidenceAdapter {
   constructor(
@@ -26,6 +27,16 @@ export class QdrantRestEvidenceAdapter implements QdrantEvidenceAdapter {
       with_vector: false,
     });
     return result.points.length > 0;
+  }
+
+  async deleteBySourceKey(sourceKey: string): Promise<void> {
+    const result = await this.client.delete(this.collection, {
+      filter: { must: [{ key: 'source_key', match: { value: sourceKey } }] },
+      wait: true,
+    });
+    if (result.status !== 'completed') {
+      throw new Error('Qdrant deletion has not completed');
+    }
   }
 }
 

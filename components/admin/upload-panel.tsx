@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import Link from 'next/link';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -21,6 +20,7 @@ import type { Category } from '@/lib/catalog';
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
   MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_MB,
   UPLOAD_HEADERS,
   UPLOAD_INPUT_ACCEPT,
   uploadMediaForExtension,
@@ -30,6 +30,7 @@ import {
   type UiUploadQueueStatus,
 } from '@/lib/admin/upload-contract';
 import { canRetryUpload, queueStatusAfterResponse } from '@/lib/admin/upload-ui-state';
+import { logoutFromKeycloak } from '@/app/admin/upload/actions';
 
 const ACCEPTED_EXTENSIONS = new Set(ACCEPTED_UPLOAD_EXTENSIONS);
 
@@ -51,6 +52,7 @@ type QueuedFile = {
 
 type Props = {
   products: ProductOption[];
+  canDelete: boolean;
 };
 
 function extensionOf(filename: string): string {
@@ -66,10 +68,10 @@ function formatBytes(bytes: number): string {
 
 function FileIcon({ extension }: { extension: string }) {
   const className = 'h-5 w-5 text-[color:var(--color-signal)]';
-  if (['png', 'jpg', 'jpeg', 'webp'].includes(extension)) {
+  if (['png', 'jpg', 'jpeg'].includes(extension)) {
     return <ImageIcon aria-hidden="true" className={className} />;
   }
-  if (['mp4', 'webm', 'mov'].includes(extension)) {
+  if (extension === 'mp4') {
     return <Film aria-hidden="true" className={className} />;
   }
   return <FileText aria-hidden="true" className={className} />;
@@ -108,8 +110,9 @@ async function loadRecentUploads(): Promise<{
   }
 }
 
-export function UploadPanel({ products }: Props) {
+export function UploadPanel({ products, canDelete }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeUpload = useRef<AbortController | null>(null);
   const [productLine, setProductLine] = useState<Category | ''>('');
   const [productId, setProductId] = useState('');
   const [files, setFiles] = useState<QueuedFile[]>([]);
@@ -118,6 +121,7 @@ export function UploadPanel({ products }: Props) {
   const [uploading, setUploading] = useState(false);
   const [recentUploads, setRecentUploads] = useState<RecentUpload[]>([]);
   const [recentNotice, setRecentNotice] = useState('Checking backend connection…');
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   const productLines = useMemo(
     () => Array.from(new Set(products.map((product) => product.category))),
@@ -150,7 +154,7 @@ export function UploadPanel({ products }: Props) {
       setRecentUploads(result.uploads);
       setRecentNotice(result.notice);
     });
-    return () => { active = false; };
+    return () => { active = false; activeUpload.current?.abort(); };
   }, []);
 
   function changeProductLine(value: Category | '') {
@@ -173,7 +177,7 @@ export function UploadPanel({ products }: Props) {
         continue;
       }
       if (file.size > MAX_UPLOAD_BYTES) {
-        rejected.push(`${file.name}: exceeds 500 MB`);
+        rejected.push(`${file.name}: exceeds ${MAX_UPLOAD_MB} MB`);
         continue;
       }
 
@@ -242,6 +246,8 @@ export function UploadPanel({ products }: Props) {
 
       for (const item of uploadCandidates) {
         updateFile(item.id, { status: 'uploading', error: undefined });
+        const controller = new AbortController();
+        activeUpload.current = controller;
         try {
           const media = uploadMediaForExtension(item.extension);
           if (!media) throw new Error('Unsupported upload type');
@@ -256,6 +262,7 @@ export function UploadPanel({ products }: Props) {
               [UPLOAD_HEADERS.csrfToken]: csrfBody.csrfToken,
             },
             body: item.file,
+            signal: controller.signal,
           });
           const body = (await response.json()) as UploadApiResponse;
           const status = queueStatusAfterResponse(body);
@@ -267,14 +274,42 @@ export function UploadPanel({ products }: Props) {
             setNotice(body.ok ? 'Upload failed' : body.error);
           }
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'Upload failed';
+          const message = controller.signal.aborted
+            ? 'Upload cancelled; you can retry'
+            : error instanceof Error ? error.message : 'Upload failed';
           updateFile(item.id, { status: 'failed', error: message });
           setNotice(message);
+        } finally {
+          if (activeUpload.current === controller) activeUpload.current = null;
         }
       }
       await refreshRecentUploads();
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function deleteStoredUpload(upload: RecentUpload) {
+    if (!canDelete || !window.confirm(`Delete ${upload.filename} from storage and search?`)) return;
+    setDeletingKey(`${upload.bucket}/${upload.key}`);
+    setNotice(null);
+    try {
+      const csrfResponse = await fetch('/api/admin/csrf', { cache: 'no-store', credentials: 'same-origin' });
+      const csrfBody = await csrfResponse.json() as { csrfToken?: string; error?: string };
+      if (!csrfResponse.ok || !csrfBody.csrfToken) throw new Error(csrfBody.error || 'Authentication unavailable');
+      const response = await fetch('/api/admin/uploads', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', [UPLOAD_HEADERS.csrfToken]: csrfBody.csrfToken },
+        body: JSON.stringify({ bucket: upload.bucket, key: upload.key }),
+      });
+      const body = await response.json() as { ok: boolean; error?: string };
+      if (!response.ok || !body.ok) throw new Error(body.error || 'Delete failed');
+      await refreshRecentUploads();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Delete failed');
+    } finally {
+      setDeletingKey(null);
     }
   }
 
@@ -299,13 +334,11 @@ export function UploadPanel({ products }: Props) {
               <p className="font-mono text-xs uppercase tracking-wider">Keycloak boundary prepared</p>
               <p className="text-xs text-[color:var(--color-neutral-400)]">Runtime configuration required</p>
             </div>
-            <Link
-              href="/api/auth/signout"
-              aria-label="Sign out"
-              className="grid h-10 w-10 place-items-center border border-[color:var(--color-neutral-700)] text-[color:var(--color-neutral-400)] hover:border-[color:var(--color-signal)] hover:text-[color:var(--color-signal)]"
-            >
-              <LogOut aria-hidden="true" className="h-4 w-4" />
-            </Link>
+            <form action={logoutFromKeycloak}>
+              <button type="submit" aria-label="Sign out of Auraplex and Keycloak" className="grid h-10 w-10 place-items-center border border-[color:var(--color-neutral-700)] text-[color:var(--color-neutral-400)] hover:border-[color:var(--color-signal)] hover:text-[color:var(--color-signal)]">
+                <LogOut aria-hidden="true" className="h-4 w-4" />
+              </button>
+            </form>
           </div>
         </div>
       </header>
@@ -337,7 +370,7 @@ export function UploadPanel({ products }: Props) {
                 <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[color:var(--color-signal)]">Step 01</p>
                 <h2 id="upload-heading" className="mt-1 font-display text-2xl font-semibold">Prepare upload</h2>
               </div>
-              <span className="font-mono text-xs text-[color:var(--color-neutral-400)]">500 MB max / file</span>
+              <span className="font-mono text-xs text-[color:var(--color-neutral-400)]">{MAX_UPLOAD_MB} MB max / file</span>
             </div>
 
             <div className="space-y-7 p-5 sm:p-6">
@@ -405,7 +438,7 @@ export function UploadPanel({ products }: Props) {
                   </div>
                   <p className="mt-5 font-display text-2xl font-semibold">Drop source files here</p>
                   <p className="mt-2 text-sm text-[color:var(--color-neutral-400)]">
-                    PDF, DOCX, PNG, JPG, WebP, MP4, WebM or QuickTime
+                    PDF, DOCX, PNG, JPG or MP4
                   </p>
                   <button
                     type="button"
@@ -459,7 +492,7 @@ export function UploadPanel({ products }: Props) {
                             <span>{formatBytes(item.file.size)}</span>
                             <span>{item.extension}</span>
                             <span className={item.ingestion === 'supported' ? 'text-[color:var(--color-success)]' : 'text-[color:var(--color-warning)]'}>
-                              {item.ingestion === 'supported' ? 'Indexable' : 'Storage only'}
+                              {item.ingestion === 'supported' ? 'Indexable' : 'Ingestion support coming'}
                             </span>
                             <span>{item.status}</span>
                           </div>
@@ -493,6 +526,9 @@ export function UploadPanel({ products }: Props) {
                 <p className="text-xs leading-5 text-[color:var(--color-neutral-400)]">
                   Files upload sequentially. The UI shows only real request states; no percentage is estimated.
                 </p>
+                {uploading && (
+                  <button type="button" onClick={() => activeUpload.current?.abort()} className="text-xs text-[color:var(--color-warning)]">Cancel current upload</button>
+                )}
                 <Button
                   type="button"
                   disabled={!canPrepareUpload}
@@ -529,7 +565,9 @@ export function UploadPanel({ products }: Props) {
                         <p className="truncate text-sm">{upload.filename}</p>
                         <span className="font-mono text-[10px] uppercase text-[color:var(--color-signal)]">{upload.status}</span>
                       </div>
+                      {upload.ingestionCapability === 'deferred' && <p className="mt-1 text-xs text-[color:var(--color-warning)]">Ingestion support coming</p>}
                       <p className="mt-2 truncate font-mono text-[10px] text-[color:var(--color-neutral-400)]">{upload.sourceKey}</p>
+                      {canDelete && <button type="button" disabled={deletingKey === `${upload.bucket}/${upload.key}`} onClick={() => void deleteStoredUpload(upload)} className="mt-2 text-xs text-[color:var(--color-danger)] disabled:opacity-50">{deletingKey === `${upload.bucket}/${upload.key}` ? 'Deleting…' : 'Delete'}</button>}
                     </li>
                   ))}
                 </ul>
@@ -537,10 +575,10 @@ export function UploadPanel({ products }: Props) {
 
               <div className="mt-6 space-y-3">
                 {[
-                  ['Queued', 'Stored, ingestion support pending', 'var(--color-warning)'],
-                  ['Pending', 'Stored and waiting for ingest evidence', 'var(--color-info)'],
+                  ['Pending', 'Stored; PDF awaits processing, other formats await ingestion support', 'var(--color-info)'],
                   ['Processed', 'Qdrant source key confirmed', 'var(--color-success)'],
                   ['Failed', 'Confirmed failure signal received', 'var(--color-danger)'],
+                  ['Unsupported', 'File type is not accepted', 'var(--color-warning)'],
                 ].map(([label, description, color]) => (
                   <div key={label} className="flex gap-3 text-xs">
                     <span aria-hidden="true" className="mt-1.5 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />

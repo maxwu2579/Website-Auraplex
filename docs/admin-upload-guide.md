@@ -1,26 +1,9 @@
 # Auraplex Admin Upload — User Guide
 
-## Upload a file
+Open `/admin/upload` and sign in with the company Keycloak account. Select a product line and product, then drop files or choose **Browse files**. Review the queue and choose **Upload**. Each file is limited to **100 MB**. Accepted formats are **PDF, DOCX, PNG, JPG/JPEG and MP4**; the file contents must match the extension and declared media type.
 
-1. Open `/admin/upload` and sign in with your company account.
-2. Select the product line.
-3. Select the product.
-4. Drag files into the upload area, or choose **Browse files**.
-5. Check the file list, then choose **Upload**.
+An upload is successful only after MinIO accepts the complete file. PDF files are stored and may later be marked **processed** when matching Qdrant evidence is found. DOCX, PNG, JPG/JPEG and MP4 files are stored now but are **pending** with **Ingestion support coming**; they are not indexed by this feature. A missing processing signal is not a failure. **Failed** means a confirmed failure, while **unsupported** means the type is not accepted. Failed uploads can be retried. **Cancel current upload** aborts the browser request and propagates cancellation to the single-part storage request.
 
-Accepted upload types are PDF, DOCX, PNG, JPG/JPEG, WebP, MP4, WebM and MOV. Each file must be 500 MB or smaller. A file whose content does not match its extension will be rejected.
+Uploaders see only their own recent uploads. Admins can see all recent uploads and can use **Delete** to remove matching Qdrant records and the MinIO object. If deletion reports an error, do not assume both systems were cleaned up; contact an administrator before retrying or relying on FAQ results. Sign out with the top-right button to leave both the app and the Keycloak SSO session.
 
-PDF is currently ready for ingestion checking. Other accepted formats can be stored, but may not be indexed yet.
-
-## Understand the status
-
-- **Queued** — stored safely; ingestion for this format is not enabled yet.
-- **Pending** — stored and waiting for evidence from the ingestion service.
-- **Processed** — the matching source key was found in Qdrant.
-- **Failed** — a confirmed failure was reported.
-
-If an upload fails, read the message, correct the issue and choose **Retry**. The page never reports a file as uploaded until storage accepts it.
-
-Uploaders see only their own recent uploads. Admins see all recent uploads. Choose the sign-out icon in the top-right corner when finished.
-
-Important: uploading the same filename again for the same product currently replaces the stored object at that key. Do not use the same filename for a different revision unless replacement is intended.
+Uploading the same sanitized filename for the same product currently replaces the object at that key. Production deployment and ingestion behavior still require end-to-end verification.

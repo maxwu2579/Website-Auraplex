@@ -1,4 +1,5 @@
 import {
+  DeleteObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -15,6 +16,7 @@ export interface PutStoredObjectInput {
   contentLength: number;
   contentType: string;
   metadata: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface StoredObject {
@@ -28,6 +30,7 @@ export interface StoredObject {
 export interface StorageAdapter {
   putObject(input: PutStoredObjectInput): Promise<{ etag?: string }>;
   listObjects(bucket: UploadBucket, limit?: number): Promise<StoredObject[]>;
+  deleteObject(bucket: UploadBucket, key: string): Promise<void>;
 }
 
 type S3Sender = Pick<S3Client, 'send'>;
@@ -53,8 +56,13 @@ export class S3StorageAdapter implements StorageAdapter {
         ContentType: input.contentType,
         Metadata: input.metadata,
       }),
+      { abortSignal: input.signal },
     );
     return { etag: output.ETag };
+  }
+
+  async deleteObject(bucket: UploadBucket, key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
   }
 
   async listObjects(bucket: UploadBucket, limit = 50): Promise<StoredObject[]> {

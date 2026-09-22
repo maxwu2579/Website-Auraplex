@@ -2,7 +2,7 @@ import { isIP } from 'node:net';
 
 export interface UploadAuditEvent {
   user: string;
-  action: 'upload.accepted' | 'upload.failed';
+  action: 'upload.accepted' | 'upload.failed' | 'delete.accepted' | 'delete.failed' | 'delete.partial';
   key: string;
   size: number;
   ip: string;

@@ -3,15 +3,20 @@ import type { Category } from '@/lib/catalog';
 export type ProductLine = Category;
 
 export type UploadStatus =
-  | 'queued'
   | 'pending'
   | 'processed'
   | 'failed'
-  | 'unknown';
+  | 'unsupported';
 
-export type UiUploadQueueStatus = 'ready' | 'uploading' | 'uploaded' | 'failed';
+export type UiUploadQueueStatus = 'ready' | 'uploading' | 'uploaded' | 'failed' | 'unsupported';
 
-export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+// Build-time value shared by browser and server. Keep at 100 until proxy/Node
+// limits are verified; operations can rebuild with 300 only after approval.
+const configuredUploadMb = Number(process.env.NEXT_PUBLIC_ADMIN_UPLOAD_MAX_MB);
+export const MAX_UPLOAD_MB = Number.isInteger(configuredUploadMb) && configuredUploadMb > 0
+  ? configuredUploadMb
+  : 100;
+export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 export const UPLOAD_HEADERS = {
   filename: 'x-upload-filename',
@@ -50,6 +55,13 @@ export interface RecentUpload {
   status: UploadStatus;
 }
 
+export interface DeleteUploadResponse {
+  ok: true;
+  bucket: UploadBucket;
+  key: string;
+  sourceKey: string;
+}
+
 export interface RecentUploadsResponse {
   ok: true;
   uploads: RecentUpload[];
@@ -73,6 +85,7 @@ export type UploadApiErrorCode =
   | 'FORBIDDEN'
   | 'RATE_LIMITED'
   | 'BACKEND_NOT_CONFIGURED'
+  | 'PARTIAL_DELETE'
   | 'INTERNAL_ERROR';
 
 export type UploadApiErrorStatus =
@@ -102,6 +115,7 @@ export const UPLOAD_ERROR_STATUS = {
   FORBIDDEN: 403,
   RATE_LIMITED: 429,
   BACKEND_NOT_CONFIGURED: 503,
+  PARTIAL_DELETE: 500,
   INTERNAL_ERROR: 500,
 } as const satisfies Record<UploadApiErrorCode, UploadApiErrorStatus>;
 
@@ -163,28 +177,10 @@ export const UPLOAD_MEDIA_ROUTES: Readonly<Record<string, UploadMediaRoute>> = {
     acceptedExtensions: ['jpg', 'jpeg'],
     ingestionCapability: 'deferred',
   },
-  'image/webp': {
-    bucket: 'auraplex-raw-image',
-    canonicalMimeType: 'image/webp',
-    acceptedExtensions: ['webp'],
-    ingestionCapability: 'deferred',
-  },
   'video/mp4': {
     bucket: 'auraplex-raw-video',
     canonicalMimeType: 'video/mp4',
     acceptedExtensions: ['mp4'],
-    ingestionCapability: 'deferred',
-  },
-  'video/webm': {
-    bucket: 'auraplex-raw-video',
-    canonicalMimeType: 'video/webm',
-    acceptedExtensions: ['webm'],
-    ingestionCapability: 'deferred',
-  },
-  'video/quicktime': {
-    bucket: 'auraplex-raw-video',
-    canonicalMimeType: 'video/quicktime',
-    acceptedExtensions: ['mov'],
     ingestionCapability: 'deferred',
   },
 };
