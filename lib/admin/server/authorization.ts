@@ -17,8 +17,8 @@ export function getAdminRoleMapping(
   env: NodeJS.ProcessEnv = process.env,
 ): AdminRoleMapping {
   return {
-    uploader: env.KEYCLOAK_UPLOADER_ROLE?.trim() || 'Uploader',
-    admin: env.KEYCLOAK_ADMIN_ROLE?.trim() || 'Admin',
+    uploader: env.KEYCLOAK_UPLOADER_ROLE?.trim() || 'auraplex-uploader',
+    admin: env.KEYCLOAK_ADMIN_ROLE?.trim() || 'auraplex-admin',
   };
 }
 

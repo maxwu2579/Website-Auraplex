@@ -58,7 +58,7 @@ function dependencies(
     authenticate: async () => ({
       userId: 'user-1',
       email: 'user@example.test',
-      groups: ['Uploader'],
+      groups: ['auraplex-uploader'],
     }),
     csrf: { verify() {} },
     rateLimiter: { consume() {} },
@@ -445,7 +445,7 @@ test('GET status gives uploaders own objects only and admins all objects', async
   const adminResponse = await getUploads(
     new Request('http://localhost/api/admin/uploads'),
     dependencies(storage, {
-      authenticate: async () => ({ userId: 'admin-1', groups: ['Admin'] }),
+      authenticate: async () => ({ userId: 'admin-1', groups: ['auraplex-admin'] }),
       qdrant: () => qdrant,
     }),
   );
@@ -484,7 +484,7 @@ function deleteRequest(key = 'labelling/flexy-applicator/manual.pdf') {
 
 function deleteDependencies(overrides: Partial<DeleteDependencies> = {}): DeleteDependencies {
   return {
-    authenticate: async () => ({ userId: 'admin-1', groups: ['Admin'] }),
+    authenticate: async () => ({ userId: 'admin-1', groups: ['auraplex-admin'] }),
     csrf: { verify() {} },
     storage: () => ({
       async putObject() { return {}; },
@@ -511,7 +511,7 @@ test('Admin delete removes exact Qdrant source before the MinIO object', async (
 test('Admin delete denies Uploader and rejects traversal before external operations', async () => {
   let used = false;
   const deps = deleteDependencies({
-    authenticate: async () => ({ userId: 'uploader', groups: ['Uploader'] }),
+    authenticate: async () => ({ userId: 'uploader', groups: ['auraplex-uploader'] }),
     storage: () => { used = true; throw new Error('must not open storage'); },
   });
   assert.equal((await deleteUpload(deleteRequest(), deps)).status, 403);

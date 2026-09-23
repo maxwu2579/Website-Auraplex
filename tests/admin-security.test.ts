@@ -5,6 +5,7 @@ import {
   canViewAllUploads,
   canUpload,
   extractKeycloakGroups,
+  getAdminRoleMapping,
   requireUploadPermission,
 } from '../lib/admin/server/authorization';
 import {
@@ -41,26 +42,41 @@ test('authorization rejects unauthenticated and unauthorized users', () => {
 });
 
 test('Uploader and Admin groups can upload with centralized mapping', () => {
-  assert.equal(canUpload({ userId: 'uploader', groups: ['Uploader'] }), true);
-  assert.equal(canUpload({ userId: 'admin', groups: ['Admin'] }), true);
+  assert.equal(canUpload({ userId: 'uploader', groups: ['auraplex-uploader'] }), true);
+  assert.equal(canUpload({ userId: 'admin', groups: ['auraplex-admin'] }), true);
   assert.equal(canUpload({ userId: 'viewer', groups: ['Viewer'] }), false);
-  assert.equal(canViewAllUploads({ userId: 'uploader', groups: ['Uploader'] }), false);
-  assert.equal(canViewAllUploads({ userId: 'admin', groups: ['Admin'] }), true);
-  assert.equal(canUpload({ userId: 'nested', groups: ['/Admin'] }), false);
+  assert.equal(canViewAllUploads({ userId: 'uploader', groups: ['auraplex-uploader'] }), false);
+  assert.equal(canViewAllUploads({ userId: 'admin', groups: ['auraplex-admin'] }), true);
+  assert.equal(canUpload({ userId: 'nested', groups: ['/auraplex-admin'] }), false);
   assert.equal(canUpload({ userId: 'nested', groups: ['/Admin'] }, { uploader: '/Uploader', admin: '/Admin' }), true);
+});
+
+test('Keycloak group defaults follow the task spec and remain configurable', () => {
+  assert.deepEqual(getAdminRoleMapping({} as NodeJS.ProcessEnv), {
+    uploader: 'auraplex-uploader',
+    admin: 'auraplex-admin',
+  });
+  assert.deepEqual(getAdminRoleMapping({
+    NODE_ENV: 'test',
+    KEYCLOAK_UPLOADER_ROLE: 'custom-uploader',
+    KEYCLOAK_ADMIN_ROLE: 'custom-admin',
+  } as NodeJS.ProcessEnv), {
+    uploader: 'custom-uploader',
+    admin: 'custom-admin',
+  });
 });
 
 test('only validated Keycloak ID-token groups grant admin access', () => {
   const profile = {
-    groups: ['/Uploader'],
+    groups: ['/auraplex-uploader'],
     realm_access: { roles: ['realm-reader'] },
     resource_access: {
-      'website-client': { roles: ['Admin'] },
+      'website-client': { roles: ['auraplex-admin'] },
       'unrelated-client': { roles: ['unrelated-admin'] },
     },
   };
-  assert.deepEqual(extractKeycloakGroups(profile), ['/Uploader']);
-  assert.deepEqual(extractKeycloakGroups({ realm_access: { roles: ['Admin'] }, resource_access: profile.resource_access }), []);
+  assert.deepEqual(extractKeycloakGroups(profile), ['/auraplex-uploader']);
+  assert.deepEqual(extractKeycloakGroups({ realm_access: { roles: ['auraplex-admin'] }, resource_access: profile.resource_access }), []);
 });
 
 test('double-submit CSRF requires matching header and cookie', () => {
@@ -164,8 +180,8 @@ test('proxy includes admin page and direct API paths', () => {
   assert.equal(isProtectedAdminPath('/en'), false);
   assert.equal(adminGuardStatus(undefined), 401);
   assert.equal(adminGuardStatus(['Viewer']), 403);
-  assert.equal(adminGuardStatus(['Uploader']), 200);
-  assert.equal(adminGuardStatus(['Admin']), 200);
+  assert.equal(adminGuardStatus(['auraplex-uploader']), 200);
+  assert.equal(adminGuardStatus(['auraplex-admin']), 200);
 });
 
 test('CSRF handler independently rejects missing or unauthorized groups', async () => {
@@ -173,7 +189,7 @@ test('CSRF handler independently rejects missing or unauthorized groups', async 
   const forbidden = await getAdminCsrfResponse(async () => ({ userId: 'viewer', groups: ['Viewer'] }));
   assert.equal(unauthenticated.status, 401);
   assert.equal(forbidden.status, 403);
-  const allowed = await getAdminCsrfResponse(async () => ({ userId: 'uploader', groups: ['Uploader'] }));
+  const allowed = await getAdminCsrfResponse(async () => ({ userId: 'uploader', groups: ['auraplex-uploader'] }));
   assert.equal(allowed.status, 200);
   assert.match(allowed.headers.get('set-cookie') ?? '', /HttpOnly/i);
 });
