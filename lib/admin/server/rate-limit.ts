@@ -14,8 +14,22 @@ export interface UploadRateLimiter {
 
 export class InMemoryUploadRateLimiter implements UploadRateLimiter {
   private readonly events = new Map<string, UploadEvent[]>();
+  private lastSweepAt = 0;
+
+  // Sweep inactive users on traffic rather than keeping a process-wide timer.
+  private pruneExpired(now: number): void {
+    if (now >= this.lastSweepAt && now - this.lastSweepAt < 60_000) return;
+    const hourAgo = now - 60 * 60 * 1000;
+    for (const [userId, events] of this.events) {
+      const recent = events.filter((event) => event.at > hourAgo);
+      if (recent.length) this.events.set(userId, recent);
+      else this.events.delete(userId);
+    }
+    this.lastSweepAt = now;
+  }
 
   consume(userId: string, bytes: number, now = Date.now()): void {
+    this.pruneExpired(now);
     const hourAgo = now - 60 * 60 * 1000;
     const minuteAgo = now - 60 * 1000;
     const recent = (this.events.get(userId) ?? []).filter((event) => event.at > hourAgo);

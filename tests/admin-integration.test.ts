@@ -9,9 +9,9 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import {
-  MAX_UPLOAD_BYTES,
   type UploadApiResponse,
 } from '../lib/admin/upload-contract';
+import { getServerUploadMaxBytes } from '../lib/admin/server/upload-limit';
 import { UploadContractError } from '../lib/admin/upload-errors';
 import { toQdrantSourceKey } from '../lib/admin/source-key';
 import {
@@ -25,7 +25,7 @@ import {
   type UploadServiceDependencies,
 } from '../lib/admin/server/upload-service';
 import { deriveUploadStatus } from '../lib/admin/server/status';
-import { deleteUpload, type DeleteDependencies } from '../lib/admin/server/delete-service';
+import { deleteUpload, readDeleteBody, type DeleteDependencies } from '../lib/admin/server/delete-service';
 import { UPLOAD_METADATA } from '../lib/admin/server/object-metadata';
 import { canRetryUpload, queueStatusAfterResponse } from '../lib/admin/upload-ui-state';
 
@@ -266,7 +266,7 @@ test('rejects oversized declarations before opening storage', async () => {
     async deleteObject() {},
   };
   const response = await putUpload(
-    uploadRequest(MAX_UPLOAD_BYTES + 1),
+    uploadRequest(getServerUploadMaxBytes() + 1),
     dependencies(storage),
   );
   assert.equal(response.status, 413);
@@ -396,6 +396,17 @@ test('Qdrant deletion waits for exact source-key filter completion', async () =>
   });
 });
 
+test('Qdrant collection selection is isolated behind a source-key resolver', async () => {
+  const seen: string[] = [];
+  const qdrant = new QdrantRestEvidenceAdapter({
+    async scroll(name: string) { seen.push(name); return { points: [], next_page_offset: null }; },
+    async delete(name: string) { seen.push(name); return { status: 'completed' }; },
+  } as never, (sourceKey) => sourceKey.startsWith('line-a/') ? 'collection-a' : 'collection-b');
+  await qdrant.hasProcessedEvidence('line-a/product/manual.pdf');
+  await qdrant.deleteBySourceKey('line-b/product/manual.pdf');
+  assert.deepEqual(seen, ['collection-a', 'collection-b']);
+});
+
 test('GET status gives uploaders own objects only and admins all objects', async () => {
   const storage: StorageAdapter = {
     async putObject() { return {}; },
@@ -506,6 +517,22 @@ test('Admin delete removes exact Qdrant source before the MinIO object', async (
   }));
   assert.equal(response.status, 200);
   assert.deepEqual(calls, [`qdrant:${target}`, `minio:auraplex-raw-pdf/${target}`]);
+});
+
+test('delete body parsing times out a stalled stream', async () => {
+  const stalled = new ReadableStream<Uint8Array>({ start() {} });
+  const request = new Request('http://localhost/api/admin/uploads', {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: stalled,
+    duplex: 'half',
+  } as RequestInit & { duplex: 'half' });
+  await assert.rejects(readDeleteBody(request, 10), (error: unknown) => {
+    assert.ok(error instanceof UploadContractError);
+    assert.equal(error.status, 408);
+    assert.equal(error.code, 'REQUEST_TIMEOUT');
+    return true;
+  });
 });
 
 test('Admin delete denies Uploader and rejects traversal before external operations', async () => {

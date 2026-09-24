@@ -18,7 +18,7 @@ import { jsonAuditLogger, requestIp } from '../lib/admin/server/audit';
 import { getMinioConfig } from '../lib/admin/server/config';
 import { getAdminCsrfResponse } from '../lib/admin/server/csrf-service';
 import { authCookieConfig } from '../lib/admin/server/auth-cookies';
-import { buildKeycloakLogoutUrl, discoverKeycloakLogoutUrl } from '../lib/admin/server/keycloak-logout';
+import { buildKeycloakLogoutUrl, discoverKeycloakLogoutUrl, tryDiscoverKeycloakLogoutUrl } from '../lib/admin/server/keycloak-logout';
 import { adminGuardStatus, isProtectedAdminPath } from '../proxy';
 import {
   InMemoryUploadRateLimiter,
@@ -132,6 +132,16 @@ test('in-memory limiter enforces minute, hour and byte boundaries', () => {
   assert.throws(() => bytes.consume('byte-user', 1, now), UploadContractError);
 });
 
+test('in-memory limiter garbage-collects expired users on later traffic', () => {
+  const limiter = new InMemoryUploadRateLimiter();
+  const tracked = (limiter as unknown as { events: Map<string, unknown> }).events;
+  limiter.consume('inactive-user', 1, 1_000_000);
+  assert.equal(tracked.has('inactive-user'), true);
+  limiter.consume('active-user', 1, 1_000_000 + 3_600_001);
+  assert.equal(tracked.has('inactive-user'), false);
+  assert.equal(tracked.has('active-user'), true);
+});
+
 test('audit logger emits only the allowlisted event fields', () => {
   const messages: string[] = [];
   const original = console.info;
@@ -159,6 +169,27 @@ test('proxy IP parsing accepts only valid first-hop addresses', () => {
   assert.equal(requestIp(new Headers({ 'x-forwarded-for': '203.0.113.7, 10.0.0.1' })), '203.0.113.7');
   assert.equal(requestIp(new Headers({ 'x-forwarded-for': 'spoofed', 'x-real-ip': '192.0.2.4' })), '192.0.2.4');
   assert.equal(requestIp(new Headers({ 'x-forwarded-for': 'spoofed' })), 'unknown');
+});
+
+test('Cloudflare IP is accepted only with a trusted ingress proof', () => {
+  const previous = process.env.ADMIN_TRUSTED_PROXY_SECRET;
+  process.env.ADMIN_TRUSTED_PROXY_SECRET = 'test-only-proxy-secret';
+  try {
+    const headers = new Headers({
+      'cf-connecting-ip': '203.0.113.21',
+      'x-forwarded-for': '192.0.2.14',
+    });
+    assert.equal(requestIp(headers), '192.0.2.14');
+    headers.set('x-auraplex-proxy-secret', 'wrong');
+    assert.equal(requestIp(headers), '192.0.2.14');
+    headers.set('x-auraplex-proxy-secret', 'test-only-proxy-secret');
+    assert.equal(requestIp(headers), '203.0.113.21');
+    headers.set('cf-connecting-ip', 'not-an-ip');
+    assert.equal(requestIp(headers), '192.0.2.14');
+  } finally {
+    if (previous === undefined) delete process.env.ADMIN_TRUSTED_PROXY_SECRET;
+    else process.env.ADMIN_TRUSTED_PROXY_SECRET = previous;
+  }
 });
 
 test('missing runtime integration configuration fails in a controlled way', () => {
@@ -245,4 +276,10 @@ test('Keycloak logout discovers the endpoint instead of hardcoding it', async ()
   assert.equal(requested, 'https://sso.example.test/realms/auraplex/.well-known/openid-configuration');
   assert.equal(url.searchParams.get('id_token_hint'), 'server-held-token');
   assert.equal(url.searchParams.get('post_logout_redirect_uri'), 'https://site.example.test/en');
+});
+
+test('Keycloak discovery failure falls back to local-only logout destination', async () => {
+  assert.equal(await tryDiscoverKeycloakLogoutUrl(undefined), null);
+  assert.equal(await tryDiscoverKeycloakLogoutUrl('token', async () => { throw new Error('offline'); }), null);
+  assert.equal(await tryDiscoverKeycloakLogoutUrl('token', async () => 'https://sso.example.test/logout'), 'https://sso.example.test/logout');
 });

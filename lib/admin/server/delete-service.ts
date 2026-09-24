@@ -9,6 +9,7 @@ import { createStorageAdapter, type StorageAdapter } from '@/lib/admin/server/st
 import { createQdrantAdapter, type QdrantEvidenceAdapter } from '@/lib/admin/server/qdrant';
 
 const MAX_DELETE_BODY_BYTES = 2_048;
+const DELETE_BODY_TIMEOUT_MS = 3_000;
 
 export interface DeleteDependencies {
   authenticate: () => Promise<AdminIdentity>;
@@ -49,7 +50,7 @@ export function validateDeleteTarget(input: unknown): { bucket: UploadBucket; ke
   return { bucket: bucket as UploadBucket, key, sourceKey: key };
 }
 
-async function readDeleteBody(request: Request): Promise<unknown> {
+export async function readDeleteBody(request: Request, timeoutMs = DELETE_BODY_TIMEOUT_MS): Promise<unknown> {
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json') || !request.body) {
     throw new UploadContractError(400, 'MALFORMED_REQUEST', 'A JSON delete target is required');
   }
@@ -57,9 +58,23 @@ async function readDeleteBody(request: Request): Promise<unknown> {
   const decoder = new TextDecoder();
   let text = '';
   let received = 0;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new UploadContractError(408, 'REQUEST_TIMEOUT', 'Delete request body timed out'));
+      void reader.cancel().catch(() => {});
+    }, timeoutMs);
+    onAbort = () => {
+      reject(new UploadContractError(408, 'REQUEST_TIMEOUT', 'Delete request was cancelled'));
+      void reader.cancel().catch(() => {});
+    };
+    request.signal.addEventListener('abort', onAbort, { once: true });
+    if (request.signal.aborted) onAbort();
+  });
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       received += value.byteLength;
       if (received > MAX_DELETE_BODY_BYTES) {
@@ -73,6 +88,8 @@ async function readDeleteBody(request: Request): Promise<unknown> {
     if (error instanceof UploadContractError) throw error;
     throw new UploadContractError(400, 'MALFORMED_REQUEST', 'Invalid JSON delete target');
   } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    if (onAbort) request.signal.removeEventListener('abort', onAbort);
     reader.releaseLock();
   }
 }

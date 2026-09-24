@@ -37,7 +37,7 @@ export async function discoverKeycloakLogoutUrl(
   const discoveryUrl = `${config.issuer}/.well-known/openid-configuration`;
   const response = await fetcher(discoveryUrl, {
     cache: 'no-store',
-    signal: AbortSignal.timeout(5_000),
+    signal: AbortSignal.timeout(1_500),
   });
   if (!response.ok) throw new Error('Keycloak discovery unavailable');
   const discovery = await response.json() as LogoutDiscovery;
@@ -51,4 +51,18 @@ export async function discoverKeycloakLogoutUrl(
     endpoint: discovery.end_session_endpoint,
     postLogoutRedirectUri: new URL('/en', appOrigin).toString(),
   });
+}
+
+export async function tryDiscoverKeycloakLogoutUrl(
+  idToken: string | undefined,
+  discover: (token: string) => Promise<string> = discoverKeycloakLogoutUrl,
+): Promise<string | null> {
+  if (!idToken) return null;
+  try {
+    return await discover(idToken);
+  } catch {
+    // The caller must still clear its local session. Upstream SSO logout is
+    // unconfirmed when discovery is unavailable.
+    return null;
+  }
 }

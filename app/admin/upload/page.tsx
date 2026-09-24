@@ -2,6 +2,7 @@ import { UploadPanel } from '@/components/admin/upload-panel';
 import { MACHINES } from '@/lib/catalog';
 import { authenticateAdminRequest, canViewAllUploads } from '@/lib/admin/server/authorization';
 import { UploadContractError } from '@/lib/admin/upload-errors';
+import { getServerUploadMaxMb } from '@/lib/admin/server/upload-limit';
 import { notFound, redirect } from 'next/navigation';
 import { connection } from 'next/server';
 import { Suspense } from 'react';
@@ -26,7 +27,7 @@ async function AuthorizedUploadPage() {
     category,
   }));
 
-  return <UploadPanel products={products} canDelete={canDelete} />;
+  return <UploadPanel products={products} canDelete={canDelete} serverMaxUploadMb={getServerUploadMaxMb()} />;
 }
 
 export default function AdminUploadPage() {

@@ -10,13 +10,16 @@ export type UploadStatus =
 
 export type UiUploadQueueStatus = 'ready' | 'uploading' | 'uploaded' | 'failed' | 'unsupported';
 
-// Build-time value shared by browser and server. Keep at 100 until proxy/Node
-// limits are verified; operations can rebuild with 300 only after approval.
-const configuredUploadMb = Number(process.env.NEXT_PUBLIC_ADMIN_UPLOAD_MAX_MB);
-export const MAX_UPLOAD_MB = Number.isInteger(configuredUploadMb) && configuredUploadMb > 0
-  ? configuredUploadMb
-  : 100;
-export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+// Optional build-time UI ceiling only. The server-enforced cap comes from
+// ADMIN_UPLOAD_MAX_MB at request time and is passed to the admin page.
+const configuredClientUploadMb = Number(process.env.NEXT_PUBLIC_ADMIN_UPLOAD_MAX_MB);
+export const CLIENT_UPLOAD_MAX_MB = Number.isSafeInteger(configuredClientUploadMb) && configuredClientUploadMb > 0
+  ? configuredClientUploadMb
+  : null;
+
+export function effectiveClientUploadMaxMb(serverMaxMb: number): number {
+  return CLIENT_UPLOAD_MAX_MB === null ? serverMaxMb : Math.min(CLIENT_UPLOAD_MAX_MB, serverMaxMb);
+}
 
 export const UPLOAD_HEADERS = {
   filename: 'x-upload-filename',
@@ -70,6 +73,7 @@ export interface RecentUploadsResponse {
 
 export type UploadApiErrorCode =
   | 'MALFORMED_REQUEST'
+  | 'REQUEST_TIMEOUT'
   | 'MISSING_CONTENT_LENGTH'
   | 'INVALID_CONTENT_LENGTH'
   | 'EMPTY_FILE'
@@ -90,6 +94,7 @@ export type UploadApiErrorCode =
 
 export type UploadApiErrorStatus =
   | 400
+  | 408
   | 401
   | 403
   | 413
@@ -100,6 +105,7 @@ export type UploadApiErrorStatus =
 
 export const UPLOAD_ERROR_STATUS = {
   MALFORMED_REQUEST: 400,
+  REQUEST_TIMEOUT: 408,
   MISSING_CONTENT_LENGTH: 400,
   INVALID_CONTENT_LENGTH: 400,
   EMPTY_FILE: 400,

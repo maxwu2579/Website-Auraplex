@@ -1,0 +1,14 @@
+# AURA-INT-001 Dependency Audit (2026-09-24)
+
+Read-only commands: `npm audit --json` and `npm audit --omit=dev --json`. Both reported **44 vulnerable package entries**: 2 critical, 20 high, 17 moderate, 5 low. These are package entries, not 44 proven exploitable paths in this application. The audit result may change as advisories and the registry change.
+
+| Priority | Package | Finding and action |
+| --- | --- | --- |
+| Critical | `next` (direct, currently 16.2.7) | The audit aggregates multiple Next.js advisories, including RCE, SSRF, DoS and cache issues. Check affected features and patched Next.js/`eslint-config-next` versions together; run regression tests and staging smoke checks. `npm audit` suggests a `react-email` major upgrade for part of this dependency graph, which is not an appropriate blind fix. |
+| Critical | `tar` (transitive) | Multiple crafted-archive DoS/crash advisories. Trace the dependency parent and update it to a patched compatible release if possible; assess whether archive parsing is reachable in the production runtime. |
+| High | `postcss`, `react-email` and transitive packages | Review the affected chains and upgrade path separately. A suggested `react-email` 6.11.0 change is semver-major. |
+| Remaining | Other high/moderate/low entries | Triage by runtime reachability, actual usage, patch availability and regression risk. |
+
+Examples in the current report include Next.js [Server Actions source exposure](https://github.com/advisories/GHSA-w37m-7fhw-fmv9) and [React flight RCE](https://github.com/advisories/GHSA-9qr9-h5gf-34mp), plus node-tar [archive parsing DoS](https://github.com/advisories/GHSA-23hp-3jrh-7fpw). These links identify reported advisories; they do not establish that every listed exploit path is reachable in this deployment.
+
+No `npm audit fix`, dependency upgrade, lockfile rewrite, or production deployment was performed. This audit is **not** a production security sign-off. Re-run after a separately reviewed dependency remediation PR and verify the final dependency tree.

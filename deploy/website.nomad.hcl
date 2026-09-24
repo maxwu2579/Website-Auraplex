@@ -29,7 +29,7 @@ job "website" {
         NODE_ENV                     = "production"
         PORT                         = "3000"
         HOSTNAME                     = "0.0.0.0"
-        NEXT_PUBLIC_SITE_URL         = "https://auraplex.info"
+        NEXT_PUBLIC_SITE_URL         = "https://www.auraplex.info"
         NEXT_PUBLIC_CHAT_API_URL     = "https://chat-api.auraplex.info"
         NEXT_PUBLIC_PLAUSIBLE_DOMAIN = "auraplex.info"
         # Sanity / Resend / Anthropic keys added by ops via templates + nomadVar.

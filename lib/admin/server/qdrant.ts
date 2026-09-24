@@ -10,15 +10,28 @@ export interface QdrantEvidenceAdapter {
 }
 
 type QdrantScroller = Pick<QdrantClient, 'scroll' | 'delete'>;
+export type QdrantCollectionResolver = (sourceKey: string) => string;
+
+// Current compatibility behavior only. The confirmed per-line collection
+// mapping can replace this resolver without changing status/delete callers.
+export function currentCollectionResolver(collection: string): QdrantCollectionResolver {
+  return () => collection;
+}
 
 export class QdrantRestEvidenceAdapter implements QdrantEvidenceAdapter {
   constructor(
     private readonly client: QdrantScroller,
-    private readonly collection: string,
-  ) {}
+    collection: string | QdrantCollectionResolver,
+  ) {
+    this.collectionForSourceKey = typeof collection === 'string'
+      ? currentCollectionResolver(collection)
+      : collection;
+  }
+
+  private readonly collectionForSourceKey: QdrantCollectionResolver;
 
   async hasProcessedEvidence(sourceKey: string): Promise<boolean> {
-    const result = await this.client.scroll(this.collection, {
+    const result = await this.client.scroll(this.collectionForSourceKey(sourceKey), {
       filter: {
         must: [{ key: 'source_key', match: { value: sourceKey } }],
       },
@@ -30,7 +43,7 @@ export class QdrantRestEvidenceAdapter implements QdrantEvidenceAdapter {
   }
 
   async deleteBySourceKey(sourceKey: string): Promise<void> {
-    const result = await this.client.delete(this.collection, {
+    const result = await this.client.delete(this.collectionForSourceKey(sourceKey), {
       filter: { must: [{ key: 'source_key', match: { value: sourceKey } }] },
       wait: true,
     });

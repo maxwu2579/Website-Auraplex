@@ -3,8 +3,8 @@ import test from 'node:test';
 import { NextRequest } from 'next/server';
 import { PUT } from '../app/api/admin/uploads/route';
 import {
-  MAX_UPLOAD_BYTES,
-  MAX_UPLOAD_MB,
+  CLIENT_UPLOAD_MAX_MB,
+  effectiveClientUploadMaxMb,
   UPLOAD_ERROR_STATUS,
   type ProductLine,
 } from '../lib/admin/upload-contract';
@@ -21,6 +21,7 @@ import {
   UploadContractError,
 } from '../lib/admin/upload-errors';
 import { sniffUploadStream } from '../lib/admin/server/mime-sniff';
+import { getServerUploadMaxBytes, getServerUploadMaxMb } from '../lib/admin/server/upload-limit';
 
 const PDF_BYTES = new TextEncoder().encode('%PDF-1.7\ncomplete-pdf-body');
 const PNG_BYTES = new Uint8Array([
@@ -76,6 +77,13 @@ test('sanitizes ordinary and Unicode filenames deterministically', () => {
   assert.equal(sanitizeUploadFilename(' Product Manual V2.PDF '), 'product-manual-v2.pdf');
   assert.equal(sanitizeUploadFilename('AR 600 中文手册.pdf'), 'ar-600.pdf');
   assert.equal(sanitizeUploadFilename('Résumé final.pdf'), 'resume-final.pdf');
+});
+
+test('allows longer filenames but preserves the extension within 255 ASCII bytes', () => {
+  const filename = sanitizeUploadFilename(`${'a'.repeat(300)}.pdf`);
+  assert.equal(filename.length, 255);
+  assert.equal(filename.endsWith('.pdf'), true);
+  assert.equal(sanitizeUploadFilename(`${'a'.repeat(190)}.pdf`).length, 194);
 });
 
 test('rejects path traversal and control characters', () => {
@@ -159,14 +167,24 @@ test('rejects unsafe object key components', () => {
 });
 
 test('validates zero, exact-limit, and over-limit file sizes', () => {
-  assert.equal(MAX_UPLOAD_MB, 100);
+  assert.equal(getServerUploadMaxMb({}), 100);
+  const maxBytes = getServerUploadMaxBytes({});
   expectContractError(() => validateDeclaredSize('0'), 'EMPTY_FILE', 400);
-  assert.equal(validateDeclaredSize(String(MAX_UPLOAD_BYTES)), MAX_UPLOAD_BYTES);
+  assert.equal(validateDeclaredSize(String(maxBytes), maxBytes), maxBytes);
   expectContractError(
-    () => validateDeclaredSize(String(MAX_UPLOAD_BYTES + 1)),
+    () => validateDeclaredSize(String(maxBytes + 1), maxBytes),
     'FILE_TOO_LARGE',
     413,
   );
+});
+
+test('server upload limit is runtime-only and UI ceiling is independently bounded', () => {
+  assert.equal(getServerUploadMaxMb({ ADMIN_UPLOAD_MAX_MB: '500' }), 500);
+  assert.equal(getServerUploadMaxMb({ ADMIN_UPLOAD_MAX_MB: '25' }), 25);
+  assert.throws(() => getServerUploadMaxMb({ ADMIN_UPLOAD_MAX_MB: '501' }));
+  assert.throws(() => getServerUploadMaxMb({ ADMIN_UPLOAD_MAX_MB: '-1' }));
+  assert.equal(CLIENT_UPLOAD_MAX_MB, null);
+  assert.equal(effectiveClientUploadMaxMb(500), 500);
 });
 
 test('counts streamed bytes without buffering the complete upload', async () => {

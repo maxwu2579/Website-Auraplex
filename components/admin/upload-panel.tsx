@@ -3,78 +3,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   AlertTriangle,
-  CheckCircle2,
   ChevronRight,
   Clock3,
   Database,
-  FileText,
-  Film,
-  Image as ImageIcon,
   LogOut,
   ShieldCheck,
-  UploadCloud,
-  X,
 } from 'lucide-react';
 import { Button } from '@/components/primitives/button';
+import { FileDropzone, ProductSelector, RecentUploadsPanel, UploadQueue, type ProductOption, type QueuedFile } from '@/components/admin/upload-panel-parts';
 import type { Category } from '@/lib/catalog';
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
-  MAX_UPLOAD_BYTES,
-  MAX_UPLOAD_MB,
+  effectiveClientUploadMaxMb,
   UPLOAD_HEADERS,
-  UPLOAD_INPUT_ACCEPT,
   uploadMediaForExtension,
   type RecentUpload,
   type RecentUploadsResponse,
   type UploadApiResponse,
-  type UiUploadQueueStatus,
 } from '@/lib/admin/upload-contract';
 import { canRetryUpload, queueStatusAfterResponse } from '@/lib/admin/upload-ui-state';
 import { logoutFromKeycloak } from '@/app/admin/upload/actions';
 
 const ACCEPTED_EXTENSIONS = new Set(ACCEPTED_UPLOAD_EXTENSIONS);
 
-type ProductOption = {
-  id: string;
-  name: string;
-  slug: string;
-  category: Category;
-};
-
-type QueuedFile = {
-  id: string;
-  file: File;
-  extension: string;
-  ingestion: 'supported' | 'deferred';
-  status: UiUploadQueueStatus;
-  error?: string;
-};
-
 type Props = {
   products: ProductOption[];
   canDelete: boolean;
+  serverMaxUploadMb: number;
 };
 
 function extensionOf(filename: string): string {
   return filename.split('.').pop()?.toLowerCase() ?? '';
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-}
-
-function FileIcon({ extension }: { extension: string }) {
-  const className = 'h-5 w-5 text-[color:var(--color-signal)]';
-  if (['png', 'jpg', 'jpeg'].includes(extension)) {
-    return <ImageIcon aria-hidden="true" className={className} />;
-  }
-  if (extension === 'mp4') {
-    return <Film aria-hidden="true" className={className} />;
-  }
-  return <FileText aria-hidden="true" className={className} />;
 }
 
 function newFileId(): string {
@@ -110,7 +69,9 @@ async function loadRecentUploads(): Promise<{
   }
 }
 
-export function UploadPanel({ products, canDelete }: Props) {
+export function UploadPanel({ products, canDelete, serverMaxUploadMb }: Props) {
+  const uiMaxUploadMb = effectiveClientUploadMaxMb(serverMaxUploadMb);
+  const uiMaxUploadBytes = uiMaxUploadMb * 1024 * 1024;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeUpload = useRef<AbortController | null>(null);
   const [productLine, setProductLine] = useState<Category | ''>('');
@@ -176,8 +137,8 @@ export function UploadPanel({ products, canDelete }: Props) {
         rejected.push(`${file.name}: empty file`);
         continue;
       }
-      if (file.size > MAX_UPLOAD_BYTES) {
-        rejected.push(`${file.name}: exceeds ${MAX_UPLOAD_MB} MB`);
+      if (file.size > uiMaxUploadBytes) {
+        rejected.push(`${file.name}: exceeds ${uiMaxUploadMb} MB`);
         continue;
       }
 
@@ -370,96 +331,27 @@ export function UploadPanel({ products, canDelete }: Props) {
                 <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[color:var(--color-signal)]">Step 01</p>
                 <h2 id="upload-heading" className="mt-1 font-display text-2xl font-semibold">Prepare upload</h2>
               </div>
-              <span className="font-mono text-xs text-[color:var(--color-neutral-400)]">{MAX_UPLOAD_MB} MB max / file</span>
+              <span className="font-mono text-xs text-[color:var(--color-neutral-400)]">{uiMaxUploadMb} MB max / file</span>
             </div>
 
             <div className="space-y-7 p-5 sm:p-6">
-              <div className="grid gap-5 md:grid-cols-2">
-                <label className="block">
-                  <span className="mb-2 block font-mono text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-neutral-300)]">
-                    Product line <span className="text-[color:var(--color-signal)]">*</span>
-                  </span>
-                  <select
-                    value={productLine}
-                    onChange={(event) => changeProductLine(event.target.value as Category | '')}
-                    className="h-12 w-full border border-[color:var(--color-neutral-600)] bg-[color:var(--color-ink)] px-4 text-sm outline-none transition-colors focus:border-[color:var(--color-signal)]"
-                  >
-                    <option value="">Select a product line</option>
-                    {productLines.map((line) => (
-                      <option key={line} value={line}>
-                        {line.charAt(0).toUpperCase() + line.slice(1)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              <ProductSelector
+                productLine={productLine}
+                productId={productId}
+                productLines={productLines}
+                filteredProducts={filteredProducts}
+                selectedProduct={selectedProduct}
+                onProductLineChange={changeProductLine}
+                onProductChange={setProductId}
+              />
 
-                <label className="block">
-                  <span className="mb-2 block font-mono text-[10px] uppercase tracking-[0.18em] text-[color:var(--color-neutral-300)]">
-                    Product <span className="text-[color:var(--color-signal)]">*</span>
-                  </span>
-                  <select
-                    value={productId}
-                    onChange={(event) => setProductId(event.target.value)}
-                    disabled={!productLine}
-                    className="h-12 w-full border border-[color:var(--color-neutral-600)] bg-[color:var(--color-ink)] px-4 text-sm outline-none transition-colors focus:border-[color:var(--color-signal)] disabled:cursor-not-allowed disabled:opacity-45"
-                  >
-                    <option value="">{productLine ? 'Select a product' : 'Select a product line first'}</option>
-                    {filteredProducts.map((product) => (
-                      <option key={product.id} value={product.id}>{product.name}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              {selectedProduct && (
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-l-2 border-[color:var(--color-signal)] pl-4 text-sm text-[color:var(--color-neutral-300)]">
-                  <span className="text-[color:var(--color-paper)]">{selectedProduct.name}</span>
-                  <span className="font-mono text-xs">ID {selectedProduct.id}</span>
-                  <span className="font-mono text-xs">/{selectedProduct.slug}</span>
-                </div>
-              )}
-
-              <div
-                onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
-                onDragOver={(event) => event.preventDefault()}
-                onDragLeave={(event) => {
-                  if (event.currentTarget === event.target) setDragActive(false);
-                }}
+              <FileDropzone
+                fileInputRef={fileInputRef}
+                dragActive={dragActive}
+                onDragActiveChange={setDragActive}
                 onDrop={handleDrop}
-                className={`relative grid min-h-64 place-items-center border border-dashed px-6 py-10 text-center transition-colors ${
-                  dragActive
-                    ? 'border-[color:var(--color-signal)] bg-[color:var(--color-signal)]/10'
-                    : 'border-[color:var(--color-neutral-600)] bg-[color:var(--color-ink)]/45 hover:border-[color:var(--color-neutral-400)]'
-                }`}
-              >
-                <div>
-                  <div className="mx-auto grid h-14 w-14 place-items-center border border-[color:var(--color-signal)]/60 text-[color:var(--color-signal)]">
-                    <UploadCloud aria-hidden="true" className="h-6 w-6" />
-                  </div>
-                  <p className="mt-5 font-display text-2xl font-semibold">Drop source files here</p>
-                  <p className="mt-2 text-sm text-[color:var(--color-neutral-400)]">
-                    PDF, DOCX, PNG, JPG or MP4
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="mt-5 font-mono text-xs uppercase tracking-[0.16em] text-[color:var(--color-signal)] underline decoration-[color:var(--color-signal)]/50 underline-offset-4 hover:text-[color:var(--color-signal-bright)]"
-                  >
-                    Browse files
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept={UPLOAD_INPUT_ACCEPT}
-                    className="sr-only"
-                    onChange={(event) => {
-                      if (event.target.files) addFiles(event.target.files);
-                      event.target.value = '';
-                    }}
-                  />
-                </div>
-              </div>
+                onFiles={addFiles}
+              />
 
               {notice && (
                 <div role="alert" className="flex gap-3 border border-[color:var(--color-danger)]/50 bg-[color:var(--color-danger)]/10 p-4 text-sm text-[color:var(--color-danger)]">
@@ -468,59 +360,13 @@ export function UploadPanel({ products, canDelete }: Props) {
                 </div>
               )}
 
-              {files.length > 0 && (
-                <div>
-                  <div className="mb-3 flex items-center justify-between">
-                    <h3 className="font-mono text-xs uppercase tracking-[0.16em]">Files ready</h3>
-                    <button
-                      type="button"
-                      onClick={() => setFiles([])}
-                      className="text-xs text-[color:var(--color-neutral-400)] hover:text-[color:var(--color-paper)]"
-                    >
-                      Clear all
-                    </button>
-                  </div>
-                  <ul className="divide-y divide-[color:var(--color-neutral-700)] border border-[color:var(--color-neutral-700)]">
-                    {files.map((item) => (
-                      <li key={item.id} className="flex items-center gap-4 px-4 py-3">
-                        <div className="grid h-10 w-10 shrink-0 place-items-center bg-[color:var(--color-ink)]">
-                          <FileIcon extension={item.extension} />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm text-[color:var(--color-paper)]">{item.file.name}</p>
-                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-wider text-[color:var(--color-neutral-400)]">
-                            <span>{formatBytes(item.file.size)}</span>
-                            <span>{item.extension}</span>
-                            <span className={item.ingestion === 'supported' ? 'text-[color:var(--color-success)]' : 'text-[color:var(--color-warning)]'}>
-                              {item.ingestion === 'supported' ? 'Indexable' : 'Ingestion support coming'}
-                            </span>
-                            <span>{item.status}</span>
-                          </div>
-                          {item.error && <p className="mt-1 text-xs text-[color:var(--color-danger)]">{item.error}</p>}
-                        </div>
-                        {item.status === 'failed' && (
-                          <button
-                            type="button"
-                            disabled={uploading}
-                            onClick={() => updateFile(item.id, { status: 'ready', error: undefined })}
-                            className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--color-signal)]"
-                          >
-                            Retry
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => removeFile(item.id)}
-                          aria-label={`Remove ${item.file.name}`}
-                          className="grid h-9 w-9 shrink-0 place-items-center text-[color:var(--color-neutral-400)] hover:bg-[color:var(--color-danger)]/10 hover:text-[color:var(--color-danger)]"
-                        >
-                          <X aria-hidden="true" className="h-4 w-4" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+              <UploadQueue
+                files={files}
+                uploading={uploading}
+                onClear={() => setFiles([])}
+                onRetry={(id) => updateFile(id, { status: 'ready', error: undefined })}
+                onRemove={removeFile}
+              />
 
               <div className="flex flex-col gap-3 border-t border-[color:var(--color-neutral-700)] pt-6 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs leading-5 text-[color:var(--color-neutral-400)]">
@@ -542,55 +388,13 @@ export function UploadPanel({ products, canDelete }: Props) {
             </div>
           </section>
 
-          <aside aria-labelledby="status-heading" className="border border-[color:var(--color-neutral-700)] bg-[color:var(--color-neutral-800)]/55">
-            <div className="border-b border-[color:var(--color-neutral-700)] px-5 py-4 sm:px-6">
-              <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-[color:var(--color-signal)]">Step 02</p>
-              <h2 id="status-heading" className="mt-1 font-display text-2xl font-semibold">Recent uploads</h2>
-            </div>
-
-            <div className="p-5 sm:p-6">
-              {recentUploads.length === 0 ? (
-                <div className="grid min-h-52 place-items-center border border-[color:var(--color-neutral-700)] bg-[color:var(--color-ink)]/35 px-5 text-center">
-                  <div>
-                    <CheckCircle2 aria-hidden="true" className="mx-auto h-7 w-7 text-[color:var(--color-neutral-500)]" />
-                    <p className="mt-4 text-sm text-[color:var(--color-neutral-200)]">No uploads to display</p>
-                    <p className="mt-2 text-xs leading-5 text-[color:var(--color-neutral-400)]">{recentNotice}</p>
-                  </div>
-                </div>
-              ) : (
-                <ul className="divide-y divide-[color:var(--color-neutral-700)] border border-[color:var(--color-neutral-700)]">
-                  {recentUploads.map((upload) => (
-                    <li key={`${upload.bucket}/${upload.key}`} className="p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="truncate text-sm">{upload.filename}</p>
-                        <span className="font-mono text-[10px] uppercase text-[color:var(--color-signal)]">{upload.status}</span>
-                      </div>
-                      {upload.ingestionCapability === 'deferred' && <p className="mt-1 text-xs text-[color:var(--color-warning)]">Ingestion support coming</p>}
-                      <p className="mt-2 truncate font-mono text-[10px] text-[color:var(--color-neutral-400)]">{upload.sourceKey}</p>
-                      {canDelete && <button type="button" disabled={deletingKey === `${upload.bucket}/${upload.key}`} onClick={() => void deleteStoredUpload(upload)} className="mt-2 text-xs text-[color:var(--color-danger)] disabled:opacity-50">{deletingKey === `${upload.bucket}/${upload.key}` ? 'Deleting…' : 'Delete'}</button>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <div className="mt-6 space-y-3">
-                {[
-                  ['Pending', 'Stored; PDF awaits processing, other formats await ingestion support', 'var(--color-info)'],
-                  ['Processed', 'Qdrant source key confirmed', 'var(--color-success)'],
-                  ['Failed', 'Confirmed failure signal received', 'var(--color-danger)'],
-                  ['Unsupported', 'File type is not accepted', 'var(--color-warning)'],
-                ].map(([label, description, color]) => (
-                  <div key={label} className="flex gap-3 text-xs">
-                    <span aria-hidden="true" className="mt-1.5 h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                    <div>
-                      <span className="font-mono uppercase tracking-wider text-[color:var(--color-neutral-200)]">{label}</span>
-                      <p className="mt-1 leading-5 text-[color:var(--color-neutral-400)]">{description}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </aside>
+          <RecentUploadsPanel
+            uploads={recentUploads}
+            notice={recentNotice}
+            canDelete={canDelete}
+            deletingKey={deletingKey}
+            onDelete={(upload) => void deleteStoredUpload(upload)}
+          />
         </div>
       </main>
     </div>

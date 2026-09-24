@@ -1,7 +1,5 @@
 import { MACHINES, PRODUCT_CATEGORIES, type Category } from '@/lib/catalog';
 import {
-  MAX_UPLOAD_BYTES,
-  MAX_UPLOAD_MB,
   UPLOAD_HEADERS,
   UPLOAD_MEDIA_ROUTES,
   type ProductLine,
@@ -11,6 +9,7 @@ import {
 } from '@/lib/admin/upload-contract';
 import { UploadContractError } from '@/lib/admin/upload-errors';
 import { toQdrantSourceKey } from '@/lib/admin/source-key';
+import { getServerUploadMaxBytes } from '@/lib/admin/server/upload-limit';
 
 const PRODUCT_LINES = new Set<Category>(PRODUCT_CATEGORIES);
 
@@ -83,6 +82,12 @@ export function resolveUploadProduct(productId: string, productLine: ProductLine
   };
 }
 
+// Routing boundary: this preserves the website's current category until the
+// ingest taxonomy and its product mapping are confirmed by the owner.
+export function resolveStorageProductLine(product: { category: Category }): ProductLine {
+  return product.category;
+}
+
 export function sanitizeUploadFilename(originalFilename: string): string {
   const trimmed = originalFilename.trim();
   if (!trimmed || /[\\/\0-\x1f\x7f]/.test(trimmed)) {
@@ -109,16 +114,21 @@ export function sanitizeUploadFilename(originalFilename: string): string {
     throw new UploadContractError(400, 'INVALID_FILENAME', 'Filename is not safe');
   }
 
-  const maxLength = 180;
+  // 255 ASCII bytes keeps this single path segment interoperable with common
+  // filesystem-backed tooling while leaving the extension intact.
+  const maxLength = 255;
   if (candidate.length <= maxLength) return candidate;
 
   if (!extension) return candidate.slice(0, maxLength).replace(/[._-]+$/g, '');
   const stemBudget = maxLength - extension.length - 1;
+  if (stemBudget < 1) {
+    throw new UploadContractError(400, 'INVALID_FILENAME', 'Filename extension is too long');
+  }
   const shortenedStem = stem.slice(0, Math.max(stemBudget, 1)).replace(/[._-]+$/g, '');
   return `${shortenedStem || 'file'}.${extension}`;
 }
 
-export function validateDeclaredSize(rawContentLength: string | null): number {
+export function validateDeclaredSize(rawContentLength: string | null, maxBytes = getServerUploadMaxBytes()): number {
   if (rawContentLength === null || rawContentLength.trim() === '') {
     throw new UploadContractError(
       400,
@@ -146,11 +156,11 @@ export function validateDeclaredSize(rawContentLength: string | null): number {
   if (size === 0) {
     throw new UploadContractError(400, 'EMPTY_FILE', 'Empty files are not accepted');
   }
-  if (size > MAX_UPLOAD_BYTES) {
+  if (size > maxBytes) {
     throw new UploadContractError(
       413,
       'FILE_TOO_LARGE',
-      `File exceeds the ${MAX_UPLOAD_MB} MB limit`,
+      `File exceeds the ${Math.floor(maxBytes / (1024 * 1024))} MB limit`,
     );
   }
   return size;
@@ -162,7 +172,7 @@ export function validateDeclaredSize(rawContentLength: string | null): number {
  * pipe the request body without buffering the whole file in Node.js memory.
  */
 export function createUploadByteLimitStream(
-  maxBytes: number = MAX_UPLOAD_BYTES,
+  maxBytes: number = getServerUploadMaxBytes(),
   expectedBytes?: number,
 ): TransformStream<Uint8Array, Uint8Array> {
   let receivedBytes = 0;
@@ -174,7 +184,7 @@ export function createUploadByteLimitStream(
         throw new UploadContractError(
           413,
           'FILE_TOO_LARGE',
-          `Received file data exceeds the ${MAX_UPLOAD_MB} MB limit`,
+          `Received file data exceeds the ${Math.floor(maxBytes / (1024 * 1024))} MB limit`,
         );
       }
       if (expectedBytes !== undefined && receivedBytes > expectedBytes) {
@@ -235,12 +245,22 @@ export function buildUploadObjectLocation(input: {
   // Deliberately deterministic: the same product and sanitized filename maps
   // to the same key, so S3/MinIO currently overwrites that object. Versioning
   // semantics require product-owner confirmation before this rule changes.
-  const key = [input.productLine, input.productSlug, input.safeFilename].join('/');
+  const key = buildCurrentObjectKey(input);
   const location = {
     bucket: input.media.bucket,
     key,
   };
   return { ...location, sourceKey: toQdrantSourceKey(location) };
+}
+
+// Keep the existing key format in one replaceable function. The ingest-side
+// parse_key() contract has not been verified, so this is not a proposed format.
+export function buildCurrentObjectKey(input: {
+  productLine: ProductLine;
+  productSlug: string;
+  safeFilename: string;
+}): string {
+  return [input.productLine, input.productSlug, input.safeFilename].join('/');
 }
 
 export function parseUploadRequestMetadata(headers: Headers): UploadRequestMetadata {
@@ -281,7 +301,7 @@ export function prepareUploadRequest(headers: Headers) {
   const safeFilename = sanitizeUploadFilename(metadata.originalFilename);
   const media = resolveUploadMedia(metadata.declaredMimeType, safeFilename);
   const location = buildUploadObjectLocation({
-    productLine: metadata.productLine,
+    productLine: resolveStorageProductLine(product),
     productSlug: product.slug,
     safeFilename,
     media,
